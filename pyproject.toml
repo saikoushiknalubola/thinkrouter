@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thinkrouter"
+version = "0.1.0"
+description = "Cut LLM reasoning-token costs by 60% with one line of code — pre-inference query difficulty routing."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = [
+    "llm", "openai", "anthropic", "inference", "optimization",
+    "routing", "reasoning", "cost-reduction", "chain-of-thought",
+    "distilbert", "nlp", "machine-learning"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+    "typing-extensions>=4.5.0",
+]
+
+[project.optional-dependencies]
+classifier = [
+    "transformers>=4.40.0",
+    "torch>=2.0.0",
+]
+openai = [
+    "openai>=1.0.0",
+]
+anthropic = [
+    "anthropic>=0.25.0",
+]
+all = [
+    "thinkrouter[classifier,openai,anthropic]",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.9.0",
+]
+
+[project.urls]
+Homepage      = "https://github.com/thinkrouter/thinkrouter"
+Documentation = "https://github.com/thinkrouter/thinkrouter#readme"
+Repository    = "https://github.com/thinkrouter/thinkrouter"
+Issues        = "https://github.com/thinkrouter/thinkrouter/issues"
+Changelog     = "https://github.com/thinkrouter/thinkrouter/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["thinkrouter*"]
+
+[tool.setuptools.package-data]
+thinkrouter = ["py.typed"]
+
+[tool.ruff]
+line-length    = 100
+target-version = "py39"
+select         = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+python_version      = "3.9"
+strict              = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+python_files = ["test_*.py"]
