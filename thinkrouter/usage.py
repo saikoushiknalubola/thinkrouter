@@ -3,13 +3,6 @@ thinkrouter.usage
 ~~~~~~~~~~~~~~~~~
 Thread-safe usage tracker that accumulates routing decisions and computes
 aggregate savings statistics. Works out of the box — no external storage needed.
-
-Usage::
-
-    tracker = UsageTracker()
-    tracker.record(query="What is 2+3?", tier=Tier.NO_THINK,
-                   confidence=0.88, latency_ms=0.4)
-    tracker.print_dashboard()
 """
 
 from __future__ import annotations
@@ -19,7 +12,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from .constants import Tier, TIER_LABELS, TIER_TOKEN_BUDGETS, TIER_DESCRIPTIONS
+from .constants import (
+    TIER_DESCRIPTIONS,
+    TIER_LABELS,
+    TIER_TOKEN_BUDGETS,
+    Tier,
+)
 
 
 # ─── Per-call record ──────────────────────────────────────────────────────────

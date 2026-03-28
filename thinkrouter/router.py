@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional
 
 from .classifier import BaseClassifier, ClassifierResult, get_classifier
-from .constants import Tier, TIER_TOKEN_BUDGETS, ProviderLiteral
+from .constants import TIER_TOKEN_BUDGETS, ProviderLiteral
 from .usage import UsageTracker
 
 

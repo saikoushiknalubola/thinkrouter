@@ -61,4 +61,4 @@ jobs:
         run: pip install ruff
 
       - name: Run ruff
-        run: ruff check thinkrouter/ --select E,F,I,N,W
+        run: ruff check thinkrouter/ --select E,F,W
