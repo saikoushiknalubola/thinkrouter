@@ -1,10 +1,10 @@
 # ThinkRouter
 
-[![CI](https://github.com/thinkrouter/thinkrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkrouter/thinkrouter/actions)
+[![CI](https://github.com/thinkrouter/thinkrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/saikoushiknalubola/thinkrouter/actions)
 [![PyPI](https://img.shields.io/pypi/v/thinkrouter)](https://pypi.org/project/thinkrouter)
 [![Python](https://img.shields.io/pypi/pyversions/thinkrouter)](https://pypi.org/project/thinkrouter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/YOUR_DEMO_LINK)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
 
 ---
 
