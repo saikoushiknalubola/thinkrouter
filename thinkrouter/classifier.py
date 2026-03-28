@@ -122,7 +122,7 @@ _FULL_THINK_PATTERNS: List[re.Pattern] = [
         re.I,
     ),
     re.compile(
-        r"\b(debug|fix|refactor)\b.{0,50}\b(code|bug|error|issue|function)\b",
+        r"\b(debug|fix|refactor)\b.{0,60}\b(code|bug|error|issue|function|deadlock|race\s+condition|memory\s+leak)\b",
         re.I,
     ),
     re.compile(

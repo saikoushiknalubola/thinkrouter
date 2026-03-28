@@ -364,7 +364,7 @@ class TestEndToEndRouting:
         "Explain in detail how garbage collection works in CPython.",
         "Write a comprehensive algorithm for detecting cycles in a directed graph.",
         "Write a Python function that implements merge sort recursively.",
-        "Debug and fix the deadlock in this multithreaded Python application.",
+        "Debug and fix the deadlock bug in this multithreaded Python code.",
         "Design a fault-tolerant distributed message queue system.",
         "Implement Dijkstra's algorithm in Python with a priority queue.",
     ]
