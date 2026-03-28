@@ -1,59 +1,70 @@
 # ThinkRouter
 
-[![CI](https://github.com/thinkrouter/thinkrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/saikoushiknalubola/thinkrouter/actions)
-[![PyPI](https://img.shields.io/pypi/v/thinkrouter)](https://pypi.org/project/thinkrouter)
-[![Python](https://img.shields.io/pypi/pyversions/thinkrouter)](https://pypi.org/project/thinkrouter)
+<div align="center">
+
+[![CI](https://github.com/saikoushiknalubola/thinkrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/saikoushiknalubola/thinkrouter/actions/workflows/ci.yml)
+[![PyPI version](https://badge.fury.io/py/thinkrouter.svg)](https://badge.fury.io/py/thinkrouter)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
 
+**Pre-inference query routing for LLM reasoning models.**  
+Cut thinking-token costs by 60% with one line of code.
+
+</div>
+
 ---
 
-**Reasoning models charge you 8,000 thinking tokens for "What is 2+3?"**  
-**ThinkRouter fixes that with one line of code.**
+## The problem
+
+Reasoning models (o1, DeepSeek-R1, Claude thinking) apply the same 8,000-token compute budget to every query — whether it is simple arithmetic or a complex proof.
+
+```
+"What is 2 + 3?"                   →  8,000 thinking tokens   ← 99% wasted
+"Prove that sqrt(2) is irrational"  →  8,000 thinking tokens   ← correctly used
+```
+
+At 100,000 queries per day, that is **$192,635/month in avoidable spend.**
+
+---
+
+## The solution
 
 ```python
 from thinkrouter import ThinkRouter
 
 client   = ThinkRouter(provider="openai")
 response = client.chat("What is the capital of France?")
-# → routed to NO_THINK  — 50 tokens used, not 8,000
+# Routed to NO_THINK → 50 tokens used, not 8,000
 
 client.usage.print_dashboard()
 ```
 
 ```
   ThinkRouter — Usage Dashboard
-  ────────────────────────────────────────────
-  Total calls          : 1,247
-  Tokens saved         : 8,734,750
-  Compute savings      : 61.3%
-  Avg classifier time  : 0.4 ms
+  ──────────────────────────────────────────────
+  Total calls          : 13
+  Tokens saved         : 55,650
+  Compute savings      : 53.5%
+  Avg classifier time  : 0.02 ms
+
+  Routing breakdown:
+    no_think        :      7  (53.8%)  — Direct answer
+    short_think     :      0  ( 0.0%)  — Moderate reasoning
+    full_think      :      6  (46.2%)  — Full extended reasoning
 ```
-
-**Validated on 1,319 real queries (GSM8K benchmark):**
-
-| Threshold | Savings | Quality retained |
-|-----------|---------|-----------------|
-| 0.65 | 59% | 91% |
-| **0.75** | **55%** | **93%** ← recommended |
-| 0.85 | 44% | 96% |
 
 ---
 
 ## How it works
 
-Every reasoning model call pays for a fixed extended thinking budget regardless
-of the question's complexity. ThinkRouter intercepts each query, runs a
-lightweight classifier (<5ms), and applies the minimum budget needed:
+ThinkRouter intercepts each query, runs a lightweight classifier in under 1ms, and routes to the minimum compute budget:
 
-```
-"What is 2+3?"                →  NO_THINK  →    50 tokens
-"How does TCP work?"          →  SHORT     →   800 tokens
-"Prove sqrt(2) is irrational" →  FULL      → 8,000 tokens
-```
-
-The classifier adds under 5ms per query. At production scale that overhead
-is negligible compared to the token savings it generates.
+| Tier | Budget | Use case |
+|------|--------|----------|
+| NO_THINK | 50 tokens | Arithmetic, definitions, lookups, translations |
+| SHORT | 800 tokens | Multi-step reasoning, moderate chaining |
+| FULL | 8,000 tokens | Proofs, system design, algorithm implementation |
 
 ---
 
@@ -80,6 +91,10 @@ pip install thinkrouter[all]
 
 ## Quick start
 
+### Try it now — no API key needed
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
+
 ### OpenAI
 
 ```python
@@ -87,9 +102,9 @@ from thinkrouter import ThinkRouter
 
 client = ThinkRouter(
     provider="openai",
-    api_key="sk-...",       # or set OPENAI_API_KEY
+    api_key="sk-...",      # or set OPENAI_API_KEY
     model="gpt-4o",
-    verbose=True,           # prints routing decision per call
+    verbose=True,
 )
 
 response = client.chat("Explain how merge sort works.")
@@ -105,12 +120,12 @@ client.usage.print_dashboard()
 ```python
 client = ThinkRouter(
     provider="anthropic",
-    api_key="sk-ant-...",   # or set ANTHROPIC_API_KEY
+    api_key="sk-ant-...",  # or set ANTHROPIC_API_KEY
     model="claude-haiku-4-5-20251001",
 )
 
 response = client.chat("What is 144 divided by 12?")
-# → NO_THINK — 50 tokens, not 8,000
+# Routed to NO_THINK → 50 tokens, not 8,000
 ```
 
 ### Streaming
@@ -128,15 +143,28 @@ results = client.classify_batch([
     "Design a distributed caching system.",
     "How many days are in a leap year?",
 ])
+
 for r in results:
-    print(f"{r.tier.name:<12}  conf={r.confidence:.2f}  budget={r.token_budget}")
+    print(f"{r.tier.name:<12}  budget={r.token_budget:>6} tokens  conf={r.confidence:.2f}")
 ```
 
 ```
-NO_THINK      conf=0.88  budget=50
-FULL          conf=0.85  budget=8000
-NO_THINK      conf=0.80  budget=50
+NO_THINK      budget=    50 tokens  conf=0.88
+FULL          budget=  8000 tokens  conf=0.85
+NO_THINK      budget=    50 tokens  conf=0.80
 ```
+
+---
+
+## Cost savings at scale
+
+| Volume | Savings/day | Savings/month |
+|--------|------------|---------------|
+| 10,000 queries/day | $642 | $19,263 |
+| 100,000 queries/day | $6,421 | $192,635 |
+| 1,000,000 queries/day | $64,212 | $1,926,346 |
+
+*Based on 53.5% savings rate, $15/million reasoning tokens (approximate o1 rate).*
 
 ---
 
@@ -144,17 +172,15 @@ NO_THINK      conf=0.80  budget=50
 
 ### Heuristic (default)
 
-Zero external dependencies. Regex patterns + word-count heuristics.
-Runs in under 1ms. Recommended for development and latency-sensitive production.
+Zero dependencies. Regex patterns and word-count heuristics. Runs in under 1ms.
 
 ```python
 client = ThinkRouter(classifier_backend="heuristic")
 ```
 
-### DistilBERT (production accuracy)
+### DistilBERT
 
-Fine-tuned on the GSM8K mathematical reasoning dataset.
-Achieves 93%+ quality retention at 60% compute savings.
+Fine-tuned on GSM8K. Achieves 93%+ quality retention at 60% compute savings.  
 Requires `pip install thinkrouter[classifier]`.
 
 ```python
@@ -168,13 +194,13 @@ client = ThinkRouter(
 
 ## Confidence threshold
 
-Queries where the classifier's confidence is below the threshold fall back
-conservatively to FULL — the safe default that never degrades output quality.
+| Threshold | Savings | Quality retained | Use case |
+|-----------|---------|-----------------|----------|
+| 0.65 | ~59% | ~91% | High cost sensitivity |
+| **0.75** | **~55%** | **~93%** | **Recommended** |
+| 0.85 | ~44% | ~96% | Quality-sensitive |
 
-```python
-client = ThinkRouter(confidence_threshold=0.80)  # more conservative
-client = ThinkRouter(confidence_threshold=0.65)  # more aggressive savings
-```
+Queries below the threshold fall back to FULL — never degrades output quality.
 
 ---
 
@@ -184,27 +210,13 @@ client = ThinkRouter(confidence_threshold=0.65)  # more aggressive savings
 
 ```python
 ThinkRouter(
-    provider             = "openai",     # "openai" | "anthropic" | "generic"
-    api_key              = None,         # falls back to env var
-    model                = None,         # default model for all calls
-    classifier_backend   = "heuristic",  # "heuristic" | "distilbert"
+    provider             = "openai",      # "openai" | "anthropic" | "generic"
+    api_key              = None,          # falls back to OPENAI_API_KEY / ANTHROPIC_API_KEY
+    model                = None,          # default model for all calls
+    classifier_backend   = "heuristic",   # "heuristic" | "distilbert"
     confidence_threshold = 0.75,
-    max_records          = 10_000,       # usage tracker record limit
+    max_records          = 10_000,
     verbose              = False,
-    **client_kwargs,                     # passed to provider SDK client
-)
-```
-
-### ThinkRouter.chat()
-
-```python
-response = client.chat(
-    query,           # str — the user query
-    model    = None, # override default model
-    messages = None, # full message history (list of dicts)
-    system   = None, # system prompt
-    temperature = 0.7,
-    **extra,         # forwarded to provider API
 )
 ```
 
@@ -213,9 +225,8 @@ response = client.chat(
 ```python
 response.content       # str — generated text
 response.routing       # ClassifierResult
-response.raw           # original provider response object
 response.provider      # "openai" | "anthropic"
-response.model         # model identifier string
+response.model         # model identifier
 response.usage_tokens  # {"prompt_tokens": N, "completion_tokens": M, ...}
 ```
 
@@ -225,16 +236,18 @@ response.usage_tokens  # {"prompt_tokens": N, "completion_tokens": M, ...}
 result.tier          # Tier.NO_THINK | Tier.SHORT | Tier.FULL
 result.confidence    # float in [0, 1]
 result.token_budget  # int — thinking tokens assigned
-result.latency_ms    # classifier wall-clock time
+result.latency_ms    # classifier wall-clock time in ms
 result.backend       # "heuristic" | "distilbert:cuda" | "distilbert:cpu"
 ```
 
 ---
 
-## Running the tests
+## Running tests
 
 ```bash
-pip install thinkrouter[dev]
+git clone https://github.com/saikoushiknalubola/thinkrouter.git
+cd thinkrouter
+pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
@@ -242,10 +255,10 @@ pytest tests/ -v
 
 ## Roadmap
 
-- [x] Heuristic classifier (v0.1)
+- [x] Heuristic classifier
 - [x] OpenAI and Anthropic adapters
 - [x] Streaming support
-- [x] Usage dashboard
+- [x] Thread-safe usage dashboard
 - [x] GitHub Actions CI (Python 3.9–3.12)
 - [ ] DistilBERT model on HuggingFace Hub
 - [ ] Multi-domain training (MMLU, HumanEval, ARC-Challenge)
@@ -257,18 +270,16 @@ pytest tests/ -v
 
 ## Research basis
 
-ThinkRouter is grounded in published research:
-
 - Zhao et al. (2025). *SelfBudgeter*. arXiv:2505.11274 — 74.47% savings validated
 - Wang et al. (2025). *TALE-EP*. ACL Findings 2025 — 67% output token reduction
-- Sanh et al. (2019). *DistilBERT*. arXiv:1910.01108 — classifier backbone
-- Cobbe et al. (2021). *GSM8K*. arXiv:2110.14168 — training dataset
+- Sanh et al. (2019). *DistilBERT*. arXiv:1910.01108
+- Cobbe et al. (2021). *GSM8K*. arXiv:2110.14168
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and PRs welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests welcome.
 
 ---
 
