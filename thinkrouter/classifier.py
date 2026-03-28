@@ -116,7 +116,27 @@ _FULL_THINK_PATTERNS: List[re.Pattern] = [
 ]
 
 _NO_THINK_MAX_WORDS  = 12
-_FULL_THINK_MIN_WORDS = 32
+_FULL_THINK_PATTERNS: List[re.Pattern] = [
+    re.compile(r"\bprove\b", re.I),
+    re.compile(r"\bderive\b", re.I),
+    re.compile(r"\boptimis[ez]\b", re.I),
+    re.compile(r"\bstep[\s\-]by[\s\-]step\b", re.I),
+    re.compile(r"\bcomprehensive\b", re.I),
+    re.compile(r"\banalyse\b|\banalyze\b", re.I),
+    re.compile(r"\bdesign\b.{0,40}\b(system|database|architecture|pipeline|api|service)\b", re.I),
+    re.compile(r"\bexplain\s+(in\s+detail|how|why|the\s+difference)\b", re.I),
+    re.compile(r"\bwrite\s+(a\s+)?(\w+\s+)?(program|code|function|class|algorithm|implementation|script)\b", re.I),
+    re.compile(r"\b(debug|fix|refactor)\b.{0,50}\b(code|bug|error|issue|function)\b", re.I),
+    re.compile(r"\bimplement\b.{0,50}\b(algorithm|data\s+structure|tree|graph|sort|search)\b", re.I),
+    re.compile(r"\bcompare\s+and\s+contrast\b", re.I),
+    re.compile(r"\b(fault[\s\-]tolerant|highly\s+available|horizontally\s+scalable|microservice)\b", re.I),
+    re.compile(r"\bcritically\s+evaluate\b", re.I),
+    re.compile(r"\bwhat\s+are\s+the\s+(tradeoffs?|advantages|disadvantages|pros\s+and\s+cons)\b", re.I),
+    re.compile(r"\bhow\s+does\b.{0,40}\bwork\b.{0,20}\b(in\s+detail|under\s+the\s+hood|internally)\b", re.I),
+    # ADD THESE TWO NEW PATTERNS:
+    re.compile(r"\b(deadlock|race\s+condition|concurrency|thread|synchroniz)\b", re.I),
+    re.compile(r"\b(debug|fix)\b.{0,80}\b(deadlock|multithreaded?|concurrent|synchronization)\b", re.I),
+]
 
 
 # ─── Heuristic classifier ─────────────────────────────────────────────────────
