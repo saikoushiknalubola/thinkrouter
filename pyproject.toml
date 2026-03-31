@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thinkrouter"
-version = "0.2.0"
-description = "Cut LLM reasoning-token costs by 60% with one line of code — pre-inference query difficulty routing."
+version = "0.3.0"
+description = "Cut LLM reasoning-token costs by 60% with one line of code."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 keywords = [
-    "llm", "openai", "anthropic", "inference", "optimization",
-    "routing", "reasoning", "cost-reduction", "chain-of-thought",
-    "o1", "deepseek", "claude", "distilbert", "nlp"
+    "llm","openai","anthropic","inference","optimization",
+    "routing","reasoning","cost-reduction","o1","deepseek",
+    "claude","chain-of-thought","token-optimization",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -24,52 +24,34 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 dependencies = [
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
-    "typing-extensions>=4.5.0",
     "tenacity>=8.2.0",
+    "typing-extensions>=4.5.0",
 ]
 
 [project.optional-dependencies]
-classifier = [
-    "transformers>=4.40.0",
-    "torch>=2.0.0",
-]
-openai = [
-    "openai>=1.30.0",
-]
-anthropic = [
-    "anthropic>=0.28.0",
-]
-server = [
-    "fastapi>=0.110.0",
-    "uvicorn>=0.29.0",
-    "python-dotenv>=1.0.0",
-]
-all = [
-    "thinkrouter[classifier,openai,anthropic,server]",
-]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.23.0",
-    "black>=24.0.0",
-    "ruff>=0.4.0",
-    "mypy>=1.9.0",
-]
+classifier = ["transformers>=4.40.0","torch>=2.0.0"]
+openai     = ["openai>=1.30.0"]
+anthropic  = ["anthropic>=0.28.0"]
+server     = ["fastapi>=0.110.0","uvicorn[standard]>=0.29.0","python-dotenv>=1.0.0","slowapi>=0.1.9"]
+all        = ["thinkrouter[classifier,openai,anthropic,server]"]
+dev        = ["pytest>=8.0.0","pytest-asyncio>=0.23.0","ruff>=0.4.0","mypy>=1.9.0"]
 
 [project.scripts]
 thinkrouter = "thinkrouter.cli:main"
 
 [project.urls]
-Homepage      = "https://github.com/saikoushiknalubola/thinkrouter"
-Repository    = "https://github.com/saikoushiknalubola/thinkrouter"
-Issues        = "https://github.com/saikoushiknalubola/thinkrouter/issues"
+Homepage   = "https://github.com/saikoushiknalubola/thinkrouter"
+Repository = "https://github.com/saikoushiknalubola/thinkrouter"
+Issues     = "https://github.com/saikoushiknalubola/thinkrouter/issues"
 
 [tool.setuptools.packages.find]
 where   = ["."]
-include = ["thinkrouter*"]
+include = ["thinkrouter*","server*"]
 
 [tool.setuptools.package-data]
 thinkrouter = ["py.typed"]
@@ -77,7 +59,7 @@ thinkrouter = ["py.typed"]
 [tool.ruff]
 line-length    = 100
 target-version = "py39"
-select         = ["E", "F", "W"]
+select         = ["E","F","W"]
 
 [tool.mypy]
 python_version         = "3.9"
@@ -85,6 +67,6 @@ strict                 = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths         = ["tests"]
-python_files      = ["test_*.py"]
-asyncio_mode      = "auto"
+testpaths    = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

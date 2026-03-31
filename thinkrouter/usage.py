@@ -2,6 +2,7 @@
 thinkrouter.usage
 ~~~~~~~~~~~~~~~~~
 Thread-safe usage tracker with aggregate savings dashboard.
+Zero external dependencies.
 """
 from __future__ import annotations
 
@@ -20,13 +21,15 @@ from .constants import (
 
 @dataclass
 class CallRecord:
-    """Immutable record of a single routed API call."""
+    """Single routing event record."""
     query_preview:   str
     tier:            Tier
     confidence:      float
     tokens_used:     int
     tokens_saved:    int
     latency_ms:      float
+    model:           str
+    provider:        str
     timestamp:       datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -48,7 +51,7 @@ class UsageSummary:
         lines = [
             "",
             "  ThinkRouter — Usage Dashboard",
-            "  " + "─" * 46,
+            "  " + "─" * 48,
             f"  Total calls          : {self.total_calls:,}",
             f"  Tokens used          : {self.total_tokens_used:,}",
             f"  Tokens saved         : {self.total_tokens_saved:,}",
@@ -80,7 +83,7 @@ class UsageTracker:
     Parameters
     ----------
     max_records : int
-        Maximum individual CallRecord objects retained.
+        Maximum individual CallRecord objects retained (FIFO eviction).
         Set to 0 to track aggregates only.
     """
 
@@ -102,6 +105,8 @@ class UsageTracker:
         tier:       Tier,
         confidence: float,
         latency_ms: float,
+        model:      str = "",
+        provider:   str = "",
     ) -> CallRecord:
         """Record a routing decision. Thread-safe."""
         used  = TIER_TOKEN_BUDGETS[tier]
@@ -110,7 +115,7 @@ class UsageTracker:
             query_preview=query[:80].replace("\n", " "),
             tier=tier, confidence=confidence,
             tokens_used=used, tokens_saved=saved,
-            latency_ms=latency_ms,
+            latency_ms=latency_ms, model=model, provider=provider,
         )
         with self._lock:
             if self._max_records > 0:
@@ -128,12 +133,14 @@ class UsageTracker:
         return rec
 
     def summary(self) -> UsageSummary:
+        """Return a snapshot of current aggregate statistics."""
         with self._lock:
             n = self._n
             if n == 0:
                 return UsageSummary(
-                    total_calls=0, total_tokens_used=0, total_tokens_saved=0,
-                    savings_pct=0.0, avg_confidence=0.0, avg_latency_ms=0.0,
+                    total_calls=0, total_tokens_used=0,
+                    total_tokens_saved=0, savings_pct=0.0,
+                    avg_confidence=0.0, avg_latency_ms=0.0,
                     tier_breakdown={t: 0 for t in Tier}, since=None,
                 )
             baseline    = n * TIER_TOKEN_BUDGETS[Tier.FULL]
@@ -150,10 +157,12 @@ class UsageTracker:
             )
 
     def recent(self, n: int = 20) -> List[CallRecord]:
+        """Return the n most recent call records."""
         with self._lock:
             return list(self._records[-n:])
 
     def reset(self) -> None:
+        """Clear all accumulated data."""
         with self._lock:
             self._records.clear()
             self._n = self._tokens_used = self._tokens_saved = 0

@@ -1,5 +1,4 @@
 name: CI
-
 on:
   push:
     branches: [main, develop]
@@ -14,43 +13,31 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Test
-        run: pytest tests/ -v --tb=short
-
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v --tb=short
       - name: Import check
         run: |
           python -c "
           from thinkrouter import ThinkRouter, Tier, TIER_TOKEN_BUDGETS
-          from thinkrouter import HeuristicClassifier, UsageTracker
+          from thinkrouter import HeuristicClassifier, UsageTracker, Config
           from thinkrouter.exceptions import ThinkRouterError, ProviderError
           clf = HeuristicClassifier()
           r   = clf.predict('What is 2+2?')
-          assert r.tier == Tier.NO_THINK
-          assert r.token_budget == 50
-          print('OK — tier:', r.tier.name, '| budget:', r.token_budget)
+          assert r.tier == Tier.NO_THINK and r.token_budget == 50
+          print('OK tier=%s budget=%s' % (r.tier.name, r.token_budget))
           "
-
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
+        with: {python-version: "3.11", cache: pip}
       - run: pip install ruff
       - run: ruff check thinkrouter/ --select E,F,W
