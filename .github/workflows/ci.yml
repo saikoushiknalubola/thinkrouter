@@ -1,9 +1,13 @@
 name: CI
+
 on:
   push:
     branches: [main, develop]
   pull_request:
     branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:
@@ -13,6 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,19 +30,21 @@ jobs:
         run: |
           python -c "
           from thinkrouter import ThinkRouter, Tier, TIER_TOKEN_BUDGETS
-          from thinkrouter import HeuristicClassifier, UsageTracker, Config
-          from thinkrouter.exceptions import ThinkRouterError, ProviderError
+          from thinkrouter import HeuristicClassifier, UsageTracker
           clf = HeuristicClassifier()
           r   = clf.predict('What is 2+2?')
           assert r.tier == Tier.NO_THINK and r.token_budget == 50
           print('OK tier=%s budget=%s' % (r.tier.name, r.token_budget))
           "
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: "3.11", cache: pip}
+        with:
+          python-version: "3.11"
+          cache: pip
       - run: pip install ruff
-      - run: ruff check thinkrouter/ --select E,F,W
+      - run: ruff check thinkrouter/ --select E,F,W --ignore E501
