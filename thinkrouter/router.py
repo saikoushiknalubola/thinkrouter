@@ -14,7 +14,6 @@ What "budget control" actually means per provider:
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
