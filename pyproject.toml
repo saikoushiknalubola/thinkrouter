@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thinkrouter"
-version = "0.3.0"
-description = "Cut LLM reasoning-token costs by 60% with one line of code."
+version = "0.4.0"
+description = "Semantic routing layer for LLM systems — domain-aware model selection and complexity routing."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
 keywords = [
-    "llm","openai","anthropic","inference","optimization",
-    "routing","reasoning","cost-reduction","o1","deepseek",
-    "claude","chain-of-thought","token-optimization",
+    "llm","openai","anthropic","inference","optimization","routing",
+    "reasoning","cost-reduction","domain-routing","semantic","ollama",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -37,7 +36,8 @@ dependencies = [
 classifier = ["transformers>=4.40.0","torch>=2.0.0"]
 openai     = ["openai>=1.30.0"]
 anthropic  = ["anthropic>=0.28.0"]
-server     = ["fastapi>=0.110.0","uvicorn[standard]>=0.29.0","python-dotenv>=1.0.0","slowapi>=0.1.9"]
+ollama     = ["httpx>=0.25.0"]
+server     = ["fastapi>=0.110.0","uvicorn[standard]>=0.29.0","python-dotenv>=1.0.0"]
 all        = ["thinkrouter[classifier,openai,anthropic,server]"]
 dev        = ["pytest>=8.0.0","pytest-asyncio>=0.23.0","ruff>=0.4.0","mypy>=1.9.0"]
 
@@ -61,8 +61,8 @@ line-length    = 100
 target-version = "py39"
 
 [tool.ruff.lint]
-select  = ["E","F","W"]
-ignore  = ["E501"]
+select = ["E","F","W"]
+ignore = ["E501"]
 
 [tool.mypy]
 python_version         = "3.9"

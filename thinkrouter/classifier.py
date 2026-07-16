@@ -105,16 +105,8 @@ _FULL_THINK: List[re.Pattern] = [
     re.compile(r"\bimplement\b.{0,30}\b(from\s+scratch|in\s+python|in\s+javascript|in\s+java|in\s+rust)\b", re.I),
     re.compile(r"\bcreate\s+(a\s+)?(\w+\s+)?(class|module|library|framework|api|sdk)\b", re.I),
     # Debugging & refactoring
-    re.compile(
-    r"\b(debug|fix|refactor)\b.{0,60}\b"
-    r"(code|bug|error|issue|function|deadlock|race\s+condition|memory\s+leak|crash)\b",
-    re.I
-),
-    re.compile(
-    r"\boptimise?\b.{0,40}\b"
-    r"(algorithm|code|query|performance|memory|time\s+complexity)\b",
-    re.I
-),
+    re.compile(r"\b(debug|fix|refactor)\b.{0,60}\b(code|bug|error|issue|function|deadlock|race\s+condition|memory\s+leak|crash)\b", re.I),
+    re.compile(r"\boptimise?\b.{0,40}\b(algorithm|code|query|performance|memory|time\s+complexity)\b", re.I),
     # Explanation
     re.compile(r"\bexplain\s+(in\s+detail|how|why|the\s+difference|the\s+concept)\b", re.I),
     re.compile(r"\bwalk\s+(me\s+)?through\b", re.I),
@@ -213,7 +205,7 @@ class DistilBertClassifier(BaseClassifier):
     threshold   : Min confidence to accept routing. Below → Tier.FULL (safe).
     """
 
-    DEFAULT_MODEL = "Koushikmahaan/query-difficulty-classifier"
+    DEFAULT_MODEL = "YOUR_HF_USERNAME/query-difficulty-classifier"
 
     def __init__(
         self,
@@ -240,6 +232,8 @@ class DistilBertClassifier(BaseClassifier):
                 "DistilBertClassifier requires the [classifier] extras.\n"
                 "Install:  pip install thinkrouter[classifier]"
             ) from exc
+
+        import torch
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._device_str = str(device)
