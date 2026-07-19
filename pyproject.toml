@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thinkrouter"
-version = "0.5.0"
+version = "0.6.0"
 description = "Semantic routing layer for LLM systems — domain routing, model registry, and query topology atlas."
 readme = "README.md"
 license = { text = "MIT" }

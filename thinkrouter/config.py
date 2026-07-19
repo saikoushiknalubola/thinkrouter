@@ -73,6 +73,11 @@ class Config:
         "embedder_backend",
         "embed_dim",
         "atlas_max",
+        # Phase 3
+        "cache_enabled",
+        "cache_threshold",
+        "cache_min_quality",
+        "cache_min_atlas_size",
     )
 
     def __init__(self) -> None:
@@ -93,6 +98,11 @@ class Config:
         self.embedder_backend     = os.getenv("THINKROUTER_EMBEDDER",   "hash")
         self.embed_dim            = _int("THINKROUTER_EMBED_DIM",        256)
         self.atlas_max            = _opt_int("THINKROUTER_ATLAS_MAX")
+        # Phase 3
+        self.cache_enabled        = _bool("THINKROUTER_CACHE_ENABLED",  True)
+        self.cache_threshold      = _float("THINKROUTER_CACHE_THRESHOLD", 0.92)
+        self.cache_min_quality    = _float("THINKROUTER_CACHE_MIN_QUALITY", 0.70)
+        self.cache_min_atlas_size = _int("THINKROUTER_CACHE_MIN_ATLAS", 50)
 
     def __repr__(self) -> str:
         return (
@@ -105,3 +115,6 @@ class Config:
 
 
 DEFAULT_CONFIG = Config()
+
+# Append Phase 3 cache settings to existing Config
+# (we patch the class in-place below)

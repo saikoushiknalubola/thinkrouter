@@ -1,19 +1,18 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/saikoushiknalubola/thinkrouter/main/assets/logo.svg" alt="ThinkRouter" width="400"/>
+![ThinkRouter](https://raw.githubusercontent.com/saikoushiknalubola/thinkrouter/main/assets/thinkrouter_logo.png)
 
-# ThinkRouter
-
-**Semantic routing layer for LLM systems.**  
-Route every query to the right model. Automatically.
+<br/>
 
 [![CI](https://github.com/saikoushiknalubola/thinkrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/saikoushiknalubola/thinkrouter/actions)
-[![PyPI version](https://badge.fury.io/py/thinkrouter.svg)](https://badge.fury.io/py/thinkrouter)
+[![PyPI version](https://badge.fury.io/py/thinkrouter.svg)](https://pypi.org/project/thinkrouter)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
 
-[**Try the Demo**](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing) · [**Documentation**](#documentation) · [**Roadmap**](#roadmap) · [**Contributing**](CONTRIBUTING.md)
+**Route every LLM query to the right model. Automatically.**
+
+[**Live Demo**](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing) · [**PyPI**](https://pypi.org/project/thinkrouter) · [**Issues**](https://github.com/saikoushiknalubola/thinkrouter/issues)
 
 </div>
 
@@ -21,26 +20,21 @@ Route every query to the right model. Automatically.
 
 ## What is ThinkRouter?
 
-Every LLM deployment today works the same way: every query goes to the same model, with the same compute budget, regardless of what it is asking or which model would answer it best.
+ThinkRouter is a pre-inference routing layer that sits between your application and any LLM API. Before the first token is sent, it makes two decisions per query — in under 2ms:
 
-ThinkRouter changes that. It sits between your application and any LLM API and makes two routing decisions per query — in under 2ms, before the first token is sent:
-
-**1. Domain routing** — which specialist model knows this best?  
-**2. Complexity routing** — how much reasoning compute does this actually need?
+**Domain routing** — which specialist model knows this subject best?  
+**Complexity routing** — how much reasoning compute does this actually need?
 
 ```python
 from thinkrouter import ThinkRouter
 
 client = ThinkRouter(provider="openai")
+r = client.chat("Write a binary search tree in Python.")
 
-response = client.chat("Write a binary search tree in Python.")
-print(response.domain_result.domain)      # Domain.CODE
-print(response.model_target.model)        # deepseek-coder-v2
-print(response.routing.tier.name)         # FULL
-
-response = client.chat("What is the capital of France?")
-print(response.domain_result.domain)      # Domain.GENERAL
-print(response.routing.tier.name)         # NO_THINK  →  50 tokens, not 8,000
+print(r.domain_result.domain)      # Domain.CODE
+print(r.model_target.model)        # deepseek-coder-v2
+print(r.routing.tier.name)         # FULL  →  8,000 token budget
+print(r.was_cached)                # True  →  returned from semantic cache
 
 client.usage.print_dashboard()
 ```
@@ -48,42 +42,35 @@ client.usage.print_dashboard()
 ```
   ThinkRouter — Usage Dashboard
   ────────────────────────────────────────────────
-  Total calls          : 13
+  Total calls          :    13
   Tokens saved         : 55,650
   Compute savings      : 53.5%
-  Avg classifier time  : 0.02 ms
+  Avg classifier time  :  0.02 ms
 ```
 
 ---
 
 ## Why ThinkRouter?
 
-### The problem with generalist models
+### Generalist models are expensive specialists
 
-GPT-4o is exceptional at general reasoning. But on a code generation benchmark, `deepseek-coder-v2` scores **91/100** vs GPT-4o's **82/100** — and costs **8x less**. On mathematical proofs, `Qwen2.5-Math` scores **94/100** vs GPT-4o's **78/100** — at **12x lower cost**.
+On a code generation benchmark, `deepseek-coder-v2` scores **91/100** against GPT-4o's **82/100** — and costs **8× less**. On mathematical proofs, `Qwen2.5-Math` scores **94/100** against GPT-4o's **78/100** — at **12× lower cost**. These specialist models exist. There are over 10,000 of them. Nobody routes to them because identifying the right one — per query, in real time — requires infrastructure that did not exist until now.
 
-These specialist models exist. There are over 10,000 of them on HuggingFace. Nobody is routing to them because there was no intelligent layer to decide when to use them.
+### Uniform compute is wasted compute
 
-Until now.
+Reasoning models apply the same 8,000-token thinking budget to `"What is 2+3?"` as to `"Prove that sqrt(2) is irrational."` ThinkRouter classifies query complexity in **0.02ms** and applies the minimum budget — measured saving: **53.5%** across benchmark queries.
 
-### The problem with uniform compute
+### Provider-neutral by design
 
-Reasoning models (o1, DeepSeek-R1, Claude thinking) apply the same 8,000-token thinking budget to `"What is 2+3?"` as to `"Prove that sqrt(2) is irrational."` ThinkRouter classifies query complexity in **0.02ms** and applies the minimum budget needed — measured saving: **53.5%** across real benchmark queries.
-
-### What makes this defensible
-
-Neither OpenAI nor Anthropic can build what ThinkRouter is becoming. They have commercial incentives to route traffic to their own models. ThinkRouter is provider-neutral — it routes to whatever model produces the best outcome for each specific query, across any provider.
+OpenAI routes to OpenAI models. Anthropic routes to Anthropic models. Neither has commercial incentive to route away from their own inference. ThinkRouter has no such conflict — it routes to whatever model produces the best outcome for each specific query, across any provider.
 
 ---
 
 ## Installation
 
 ```bash
-# Base install — heuristic classifier, zero ML dependencies
+# Base install — zero ML dependencies
 pip install thinkrouter
-
-# With Ollama support (free local models)
-pip install thinkrouter[ollama]
 
 # With OpenAI
 pip install thinkrouter[openai]
@@ -91,7 +78,10 @@ pip install thinkrouter[openai]
 # With Anthropic
 pip install thinkrouter[anthropic]
 
-# With fine-tuned DistilBERT classifier
+# With Ollama (free local models — no API key)
+pip install thinkrouter[ollama]
+
+# With DistilBERT classifier
 pip install thinkrouter[classifier]
 
 # Everything
@@ -102,102 +92,124 @@ pip install thinkrouter[all]
 
 ## Quick start
 
-### Route to specialist models by domain
+### Domain routing with Ollama (free, no API key)
 
 ```python
 from thinkrouter import ThinkRouter
 
-# Ollama — free local models, no API key
 client = ThinkRouter(provider="ollama")
 
-# Code query → routes to deepseek-coder-v2 automatically
-r = client.chat("Implement a thread-safe singleton pattern in Python.")
+# Code → deepseek-coder-v2
+r = client.chat("Write a thread-safe singleton pattern in Python.")
 print(r.domain_result.domain)       # Domain.CODE
 print(r.model_target.model)         # deepseek-coder-v2
 print(r.model_target.quality_score) # 0.91
 
-# Math query → routes to qwen2.5-math automatically
-r = client.chat("Prove by induction that sum of n integers is n(n+1)/2.")
+# Math → qwen2.5-math
+r = client.chat("Prove by induction that n² > 2n for all n > 2.")
 print(r.domain_result.domain)       # Domain.MATH
 print(r.model_target.model)         # qwen2.5-math
 ```
 
-### With OpenAI — domain routing selects best OpenAI model per domain
+### Domain routing with OpenAI
 
 ```python
 client = ThinkRouter(
     provider="openai",
-    preferred_provider="openai",   # use OpenAI models for all domains
+    preferred_provider="openai",
     verbose=True,
 )
 
 r = client.chat("What are the GDPR requirements for data processing?")
 # [ThinkRouter] tier=FULL  conf=0.91  domain=legal  model=gpt-4o
 
-r = client.chat("What is 144 divided by 12?")
-# [ThinkRouter] tier=NO_THINK  conf=0.88  domain=general  model=gpt-4o-mini
+r = client.chat("What is 144 / 12?")
+# [ThinkRouter] tier=NO_THINK  conf=0.88  domain=general  budget=50 tokens
 ```
 
 ### Classify without any API call
 
 ```python
-# Domain classification
+# Domain classification — 0 deps, < 1ms
 result = client.classify_domain("What is the mechanism of action of metformin?")
 print(result.domain)      # Domain.MEDICAL
 print(result.confidence)  # 0.58
 print(result.signals)     # ('pharma', 'drug_names')
 
 # Complexity classification
-result = client.classify("Design a distributed caching system.")
-print(result.tier.name)   # FULL
+result = client.classify("Design a fault-tolerant distributed caching system.")
+print(result.tier.name)    # FULL
 print(result.token_budget) # 8000
 
-# Both at once
-complexity, domain = client.classify_full("Write a binary search in Python.")
+# Both at once — no API call
+complexity, domain = client.classify_full("Write a quicksort in Python.")
 print(complexity.tier.name)  # FULL
 print(domain.domain)         # Domain.CODE
+```
 
-# Batch (no API calls)
-results = client.classify_domain_batch([
-    "Write a SQL query to join three tables.",
-    "Prove Fermat's Last Theorem.",
-    "What are the symptoms of type 2 diabetes?",
-    "What is the capital of Japan?",
-])
-for r in results:
-    print(f"{r.domain.value:<12} {r.confidence:.2f}")
+### Semantic cache (Phase 3)
+
+```python
+from thinkrouter.domain import Domain
+from thinkrouter.constants import Tier
+
+# Warmup with known query types
+client.cache.warmup(
+    queries=["Write a binary search.", "Implement merge sort."],
+    domains=[Domain.CODE, Domain.CODE],
+    models=["deepseek-coder-v2", "deepseek-coder-v2"],
+)
+
+r = client.chat("Write a binary search algorithm.")
+print(r.was_cached)                   # True
+print(r.cache_result.similarity)      # 0.984
+print(r.cache_result.latency_ms)      # 1.2ms
+
+client.cache.print_stats()
 ```
 
 ```
-code         0.50
-math         0.50
-medical      0.50
-general      0.80
+  ThinkRouter — Semantic Cache Stats
+  ──────────────────────────────────────────────
+  Atlas size         : 2
+  Total lookups      : 1
+  Cache hits         : 1
+  Hit rate           : 100.0%
+  Avg hit similarity : 0.9840
+  Avg hit latency    : 1.24 ms
 ```
 
 ### Streaming
 
 ```python
-for chunk in client.stream("Explain the proof of the Riemann hypothesis."):
+for chunk in client.stream("Explain the proof of the Pythagorean theorem."):
     print(chunk, end="", flush=True)
 ```
 
-### Async (FastAPI, asyncio)
+### Async (FastAPI / asyncio)
 
 ```python
-import asyncio
-from thinkrouter import ThinkRouter
-
-client = ThinkRouter(provider="openai")
-
 async def handle(query: str):
     return await client.achat(query)
 
-# Async streaming
-async def stream(query: str):
+async def stream_response(query: str):
     async for chunk in client.astream(query):
         print(chunk, end="", flush=True)
 ```
+
+---
+
+## Architecture
+
+![ThinkRouter Architecture](https://raw.githubusercontent.com/saikoushiknalubola/thinkrouter/main/assets/thinkrouter_architecture.png)
+
+Every query passes through three phases before reaching the provider API:
+
+**Phase 3 — Semantic Cache** checks the Atlas for a query with the same intent. On a hit (cosine similarity ≥ 0.92), the stored routing decision is returned in under 2ms and both classifiers are skipped. The model API still generates a fresh response.
+
+**Phase 1 — Classifiers** run on cache misses. The domain classifier identifies the subject (CODE, MATH, MEDICAL, LEGAL, FINANCIAL, GENERAL) in under 1ms. The complexity classifier assigns a token budget (50 / 800 / 8,000) in 0.02ms. The model registry resolves the best specialist model for the detected domain.
+
+**Phase 2 — Atlas Storage** runs in a background thread after every inference call. The query embedding, routing decision, and quality score are stored persistently. This is the data that makes Phase 3 work — the cache grows smarter with every query processed.
 
 ---
 
@@ -205,39 +217,33 @@ async def stream(query: str):
 
 ### Domain routing
 
-ThinkRouter detects 6 domains and routes to the best available specialist:
+ThinkRouter detects 6 domains and routes to the best specialist:
 
-| Domain | Detected by | Default specialist (Ollama) | Quality vs GPT-4o |
-|--------|------------|----------------------------|-------------------|
-| `CODE` | Language names, code keywords, implementation intent | `deepseek-coder-v2` | +11 points |
-| `MATH` | Theorems, calculus, linear algebra, statistics | `qwen2.5-math` | +16 points |
-| `MEDICAL` | Diagnoses, drugs, anatomy, procedures | `medllama2` | +15 points |
-| `LEGAL` | Contracts, regulations, case law, compliance | `llama3.1` | +14 points |
-| `FINANCIAL` | Markets, valuation, accounting, DCF | `llama3.1` | +9 points |
+| Domain | Detected by | Default specialist (Ollama) | vs GPT-4o |
+|--------|------------|----------------------------|-----------|
+| `CODE` | Language names, implementation keywords | `deepseek-coder-v2` | +11 pts |
+| `MATH` | Theorems, calculus, linear algebra, stats | `qwen2.5-math` | +16 pts |
+| `MEDICAL` | Diagnoses, drugs, anatomy, procedures | `medllama2` | +15 pts |
+| `LEGAL` | Contracts, regulations, case law | `llama3.1` | +14 pts |
+| `FINANCIAL` | Markets, valuation, accounting | `llama3.1` | +9 pts |
 | `GENERAL` | Everything else | `llama3.1` | Baseline |
 
 ### Complexity routing
 
-Three compute tiers, applied before every inference call:
-
-| Tier | Budget | Used for |
-|------|--------|----------|
+| Tier | Budget | Applied when |
+|------|--------|-------------|
 | `NO_THINK` | 50 tokens | Arithmetic, definitions, direct lookups |
 | `SHORT` | 800 tokens | Multi-step reasoning, moderate chains |
 | `FULL` | 8,000 tokens | Proofs, system design, algorithm implementation |
 
-For OpenAI o1/o3 models, ThinkRouter sets `reasoning_effort="low"` or `"high"` directly — controlling actual thinking compute, not just output length. For Anthropic Claude, it sets `thinking={"type":"enabled","budget_tokens":N}`.
+For OpenAI o1/o3, ThinkRouter sets `reasoning_effort="low"` or `"high"` — controlling actual thinking compute, not just output length. For Anthropic Claude, it sets `thinking={"type":"enabled","budget_tokens":N}`.
 
 ### Model registry
-
-The registry maps domains to specialist models. Fully customisable:
 
 ```python
 from thinkrouter import ModelRegistry, Domain
 
 reg = ModelRegistry()
-
-# See all registered models
 print(reg.summary())
 
 # Add your own fine-tuned model
@@ -247,46 +253,46 @@ reg.register(
     model="gpt-4o-medical-finetuned",
     quality_score=0.94,
     cost_relative=1.2,
-    notes="Fine-tuned on clinical notes dataset"
 )
 
-# Use custom registry
 client = ThinkRouter(provider="openai", registry=reg)
 ```
 
 ### Ollama (free local models)
 
-Run specialist models locally with no API cost:
-
 ```bash
-# Install Ollama from https://ollama.ai
-ollama pull deepseek-coder-v2   # code specialist
-ollama pull qwen2.5-math        # math specialist  
-ollama pull llama3.1            # general purpose
-ollama pull medllama2           # medical specialist
+# Install from https://ollama.ai
+ollama pull deepseek-coder-v2   # code
+ollama pull qwen2.5-math        # math
+ollama pull llama3.1            # general / legal / financial
+ollama pull medllama2           # medical
 ```
 
 ```python
-client = ThinkRouter(provider="ollama")
-# Zero API cost. Routing happens automatically.
+client = ThinkRouter(provider="ollama")  # zero cost, fully offline
 ```
 
 ### ThinkRouter constructor
 
 ```python
 ThinkRouter(
-    provider              = "openai",           # "openai" | "anthropic" | "ollama" | "generic"
-    api_key               = None,               # falls back to env var
-    model                 = None,               # default model; overridden by domain routing
-    classifier_backend    = "heuristic",        # "heuristic" | "distilbert"
-    confidence_threshold  = 0.75,               # min complexity confidence for routing
-    domain_routing        = True,               # enable domain-aware model selection
-    domain_min_confidence = 0.45,               # min domain confidence to override default model
-    preferred_provider    = None,               # provider preference for domain routing
-    registry              = None,               # custom ModelRegistry
-    max_retries           = 3,                  # retry on rate limits / 5xx errors
-    max_records           = 10_000,             # usage tracker record limit
-    verbose               = False,              # print routing decision per call
+    provider              = "openai",      # "openai" | "anthropic" | "ollama" | "generic"
+    api_key               = None,          # falls back to env var
+    model                 = None,          # overridden by domain routing
+    classifier_backend    = "heuristic",   # "heuristic" | "distilbert"
+    confidence_threshold  = 0.75,
+    domain_routing        = True,
+    domain_min_confidence = 0.45,
+    preferred_provider    = None,          # "openai" | "anthropic" | "ollama"
+    registry              = None,          # custom ModelRegistry
+    atlas_enabled         = True,          # Phase 2 storage
+    cache_enabled         = True,          # Phase 3 semantic cache
+    cache_threshold       = 0.92,          # cosine similarity threshold
+    cache_min_quality     = 0.70,          # min quality score to use cached decision
+    cache_min_atlas_size  = 50,            # min records before cache activates
+    embedder_backend      = "hash",        # "hash" | "openai" | "local"
+    max_retries           = 3,
+    verbose               = False,
     ollama_url            = "http://localhost:11434",
 )
 ```
@@ -294,15 +300,29 @@ ThinkRouter(
 ### RouterResponse
 
 ```python
-response.content           # str — generated text
-response.routing           # ClassifierResult — complexity routing decision
-response.domain_result     # DomainResult — domain detection result
+response.content           # Generated text
+response.routing           # ClassifierResult — complexity decision (None on cache hit)
+response.domain_result     # DomainResult — domain detection
 response.model_target      # ModelTarget — specialist model selected
-response.provider          # "openai" | "anthropic" | "ollama"
-response.model             # model identifier actually used
+response.cache_result      # CacheResult — cache hit details (None on miss)
+response.was_cached        # bool — True when semantic cache was used
+response.tier              # Routing tier regardless of source
+response.provider          # Provider used
+response.model             # Model identifier used
 response.usage_tokens      # {"prompt_tokens": N, "completion_tokens": M, ...}
-response.reasoning_effort  # OpenAI reasoning_effort applied (o1/o3 only)
-response.thinking_budget   # Anthropic thinking budget_tokens applied
+response.record_id         # Atlas UUID — use with update_quality()
+response.reasoning_effort  # OpenAI reasoning_effort (o1/o3 only)
+response.thinking_budget   # Anthropic budget_tokens applied
+```
+
+### Quality feedback loop
+
+```python
+r = client.chat("Prove that there are infinitely many primes.")
+
+# After reviewing the response
+client.update_quality(r.record_id, 0.95)
+# Stored in atlas — powers Phase 4 confidence modelling
 ```
 
 ### Environment variables
@@ -310,70 +330,49 @@ response.thinking_budget   # Anthropic thinking budget_tokens applied
 ```bash
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
-THINKROUTER_BACKEND=heuristic       # or distilbert
+THINKROUTER_BACKEND=heuristic        # or distilbert
 THINKROUTER_THRESHOLD=0.75
-THINKROUTER_VERBOSE=0               # 1 to enable
-THINKROUTER_MAX_RETRIES=3
-THINKROUTER_HF_MODEL=username/query-difficulty-classifier
+THINKROUTER_VERBOSE=0                # 1 to print routing per call
+THINKROUTER_ATLAS_ENABLED=1
+THINKROUTER_EMBEDDER=hash            # hash | openai | local
+THINKROUTER_CACHE_ENABLED=1
+THINKROUTER_CACHE_THRESHOLD=0.92
+THINKROUTER_CACHE_MIN_QUALITY=0.70
+THINKROUTER_CACHE_MIN_ATLAS=50
 ```
 
 ---
 
 ## Benchmark
 
-Run the Phase 1 benchmark to measure domain routing quality vs GPT-4o baseline:
-
 ```bash
 # Domain detection demo — no API key needed
 python examples/benchmark.py --demo
 
-# Full benchmark with quality scoring
+# Full quality benchmark (uses GPT-4o as judge)
 export OPENAI_API_KEY=sk-...
 python examples/benchmark.py --provider openai
 
-# Benchmark using free local Ollama models
+# Free benchmark via Ollama
 python examples/benchmark.py --provider ollama --no-judge
 ```
 
-Sample output:
-```
-  ThinkRouter — Phase 1 Domain Routing Benchmark
-  ────────────────────────────────────────────────────────
-  [✓] code         → deepseek-coder-v2             Q=9
-  [✓] code         → deepseek-coder-v2             Q=9
-  [✓] math         → qwen2.5-math                  Q=10
-  [✓] medical      → medllama2                     Q=8
-  [✓] legal        → llama3.1                      Q=8
+| Domain | GPT-4o | Specialist | Score | Cost |
+|--------|--------|------------|-------|------|
+| Code | 82/100 | deepseek-coder-v2 | **91/100** | 8× cheaper |
+| Math | 78/100 | Qwen2.5-Math | **94/100** | 12× cheaper |
+| Medical | 71/100 | OpenBioLLM-70B | **86/100** | 20× cheaper |
+| Legal | 74/100 | SaulLM-54B | **88/100** | 15× cheaper |
+| Financial | 76/100 | FinMA-7B | **80/100** | 10× cheaper |
+| General | 89/100 | GPT-4o | 89/100 | Baseline |
 
-  RESULTS SUMMARY
-  ────────────────────────────────────────────────────────
-  CODE       acc=5/5 (100%)  quality=9.0/10  model=deepseek-coder-v2
-  MATH       acc=5/5 (100%)  quality=9.4/10  model=qwen2.5-math
-  MEDICAL    acc=5/5 (100%)  quality=8.2/10  model=medllama2
-  LEGAL      acc=5/5 (100%)  quality=8.0/10  model=llama3.1
-  GENERAL    acc=5/5 (100%)  quality=8.8/10  model=gpt-4o
-```
-
----
-
-## CLI
-
-```bash
-# Classify a single query
-thinkrouter classify "Write a binary search tree in Python."
-
-# Run the routing demo (no API key)
-thinkrouter demo
-
-# Version
-thinkrouter --version
-```
+*Scores are directional estimates based on published domain benchmarks.*
 
 ---
 
 ## Proxy server
 
-ThinkRouter ships with an OpenAI-compatible proxy server. Point any existing OpenAI client at it — routing happens automatically with zero code changes:
+Point any existing OpenAI client at ThinkRouter with a single base URL change:
 
 ```bash
 pip install thinkrouter[server]
@@ -385,7 +384,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-openai-key",
-    base_url="http://localhost:8000/v1",   # ← only change
+    base_url="http://localhost:8000/v1",   # only change needed
 )
 
 response = client.chat.completions.create(
@@ -393,7 +392,23 @@ response = client.chat.completions.create(
     messages=[{"role": "user", "content": "Write a quicksort in Python."}]
 )
 # Automatically routed to deepseek-coder-v2 via domain detection
-print(response.thinkrouter)   # routing metadata
+print(response.thinkrouter)
+# {"tier": "FULL", "domain": "code", "model": "deepseek-coder-v2", ...}
+```
+
+---
+
+## CLI
+
+```bash
+# Classify a query (no API key)
+thinkrouter classify "Write a binary search tree in Python."
+
+# Run the routing demo
+thinkrouter demo
+
+# Version
+thinkrouter --version
 ```
 
 ---
@@ -408,82 +423,25 @@ pytest tests/ -v
 ```
 
 ```
-84 passed in 0.31s
+79 passed in 0.99s
 ```
-
----
-
-## Architecture
-
-```
-Application
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│              ThinkRouter                    │
-│                                             │
-│  ┌──────────────┐   ┌───────────────────┐  │
-│  │   Domain     │   │   Complexity      │  │
-│  │  Classifier  │   │   Classifier      │  │
-│  │  (<1ms)      │   │   (<1ms)          │  │
-│  └──────┬───────┘   └─────────┬─────────┘  │
-│         │                     │             │
-│         ▼                     ▼             │
-│  ┌──────────────┐   ┌───────────────────┐  │
-│  │   Model      │   │   Tier Budget     │  │
-│  │  Registry    │   │   (50/800/8000)   │  │
-│  └──────┬───────┘   └─────────┬─────────┘  │
-│         │                     │             │
-│         └──────────┬──────────┘             │
-│                    ▼                        │
-│            Provider Adapter                 │
-│      (OpenAI / Anthropic / Ollama)          │
-└─────────────────────────────────────────────┘
-         │               │
-         ▼               ▼
-   Specialist        Generalist
-     Model             Model
-```
-
----
-
-## Roadmap
-
-- [x] Heuristic complexity classifier (NO_THINK / SHORT / FULL)
-- [x] OpenAI and Anthropic adapters with native reasoning control
-- [x] Async support (`achat`, `astream`)
-- [x] Retry with exponential backoff
-- [x] Thread-safe usage dashboard
-- [x] GitHub Actions CI (Python 3.9–3.12)
-- [x] **Phase 1: Domain classifier** — 6 domains, 35 pattern groups
-- [x] **Phase 1: Model registry** — specialist model selection per domain
-- [x] **Phase 1: Ollama adapter** — free local model routing
-- [x] **Phase 1: Benchmark tool** — quality measurement vs GPT-4o
-- [ ] **Phase 2: Embedding layer** — store (query_embedding, domain, quality_score)
-- [ ] **Phase 3: Semantic cache** — nearest-neighbor routing decisions in <2ms
-- [ ] **Phase 4: Confidence model** — hallucination risk detection before inference
-- [ ] **Phase 5: Atlas API** — query topology atlas as a paid endpoint
-- [ ] DistilBERT model on HuggingFace Hub
-- [ ] Multi-domain training (MMLU, HumanEval, ARC-Challenge)
 
 ---
 
 ## Research basis
 
-ThinkRouter is grounded in peer-reviewed research:
-
-- Zhao et al. (2025). *SelfBudgeter: LLM Self-Determine Context Length for Efficient Reasoning*. [arXiv:2505.11274](https://arxiv.org/abs/2505.11274) — 74.47% savings validated
-- Wang et al. (2025). *TALE-EP*. ACL Findings 2025 — 67% output token reduction
-- Sanh et al. (2019). *DistilBERT*. [arXiv:1910.01108](https://arxiv.org/abs/1910.01108)
-- Cobbe et al. (2021). *GSM8K*. [arXiv:2110.14168](https://arxiv.org/abs/2110.14168)
+| Paper | Finding | Relevance |
+|-------|---------|-----------|
+| Zhao et al. (2025). *SelfBudgeter*. [arXiv:2505.11274](https://arxiv.org/abs/2505.11274) | 74.47% token reduction via adaptive budget | Complexity routing design |
+| Wang et al. (2025). *TALE-EP*. ACL Findings 2025 | 67% output token reduction | Budget tier calibration |
+| Sanh et al. (2019). *DistilBERT*. [arXiv:1910.01108](https://arxiv.org/abs/1910.01108) | 40% smaller, 97% accuracy | DistilBERT classifier backend |
+| Cobbe et al. (2021). *GSM8K*. [arXiv:2110.14168](https://arxiv.org/abs/2110.14168) | Math reasoning benchmark | Domain classifier evaluation |
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests welcome.
-
-To add a new domain: extend the pattern lists in `thinkrouter/domain.py` and add a registry entry in `thinkrouter/registry.py`. Open a PR with tests showing correct classification on at least 5 representative queries.
+Issues and pull requests are welcome. To add a new domain: extend the pattern lists in `thinkrouter/domain.py` and add a registry entry in `thinkrouter/registry.py`. Open a PR with tests showing correct classification on at least 5 representative queries.
 
 ---
 
@@ -494,5 +452,7 @@ MIT — see [LICENSE](LICENSE).
 ---
 
 <div align="center">
-<sub>Built by <a href="https://github.com/saikoushiknalubola">Saikoushik Nalubola</a> · Incubated at SRiX, SR University · Backed by MeitY TIDE 2.0</sub>
+
+Built by [Saikoushik Nalubola](https://github.com/saikoushiknalubola) · Incubated at [SRiX](https://sriuniversity.edu.in/srix.aspx), SR University · Backed by MeitY TIDE 2.0
+
 </div>
