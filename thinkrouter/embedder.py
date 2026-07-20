@@ -41,7 +41,6 @@ Usage::
 from __future__ import annotations
 
 import hashlib
-import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -49,7 +48,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from .exceptions import ClassifierError, ConfigurationError
+from .exceptions import ConfigurationError
 
 
 # ── Result ─────────────────────────────────────────────────────────────────

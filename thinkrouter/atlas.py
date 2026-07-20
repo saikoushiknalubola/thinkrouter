@@ -48,11 +48,9 @@ Usage::
 """
 from __future__ import annotations
 
-import io
 import os
 import sqlite3
 import threading
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -110,7 +108,7 @@ class AtlasStats:
             f"  Storage path      : {self.storage_path}",
             f"  Embedding backend : {self.embedding_backend}",
             f"  Avg quality score : {self.avg_quality:.3f}" if self.avg_quality else
-            f"  Avg quality score : N/A (no scores yet)",
+            "  Avg quality score : N/A (no scores yet)",
             "",
             "  Domain breakdown:",
         ]

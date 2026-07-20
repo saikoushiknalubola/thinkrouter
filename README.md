@@ -453,6 +453,16 @@ MIT — see [LICENSE](LICENSE).
 
 <div align="center">
 
-Built by [Saikoushik Nalubola](https://github.com/saikoushiknalubola) · Incubated at [SRiX](https://sriuniversity.edu.in/srix.aspx), SR University · Backed by MeitY TIDE 2.0
+[![GitHub Stars](https://img.shields.io/github/stars/saikoushiknalubola/thinkrouter?style=flat-square&color=cc0000)](https://github.com/saikoushiknalubola/thinkrouter/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/saikoushiknalubola/thinkrouter?style=flat-square&color=555)](https://github.com/saikoushiknalubola/thinkrouter/network/members)
+[![GitHub Issues](https://img.shields.io/github/issues/saikoushiknalubola/thinkrouter?style=flat-square)](https://github.com/saikoushiknalubola/thinkrouter/issues)
+[![GitHub Last Commit](https://img.shields.io/github/last-commit/saikoushiknalubola/thinkrouter?style=flat-square)](https://github.com/saikoushiknalubola/thinkrouter/commits/main)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/thinkrouter?style=flat-square&color=cc0000&label=PyPI%20downloads)](https://pypi.org/project/thinkrouter)
+
+<br/>
+
+**ThinkRouter is open source under the [MIT License](LICENSE)**
+
+[View on GitHub](https://github.com/saikoushiknalubola/thinkrouter) · [Report an Issue](https://github.com/saikoushiknalubola/thinkrouter/issues/new) · [PyPI](https://pypi.org/project/thinkrouter) · [Live Demo](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
 
 </div>

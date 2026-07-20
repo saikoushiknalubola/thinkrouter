@@ -25,10 +25,6 @@ from .cache import CacheResult, SemanticCache
 from .classifier import BaseClassifier, ClassifierResult, get_classifier
 from .config import Config, DEFAULT_CONFIG
 from .constants import (
-    ANTHROPIC_THINKING_BUDGETS,
-    ANTHROPIC_THINKING_MODELS,
-    OPENAI_REASONING_EFFORT,
-    OPENAI_REASONING_MODELS,
     TIER_TOKEN_BUDGETS,
     ProviderLiteral,
     Tier,
@@ -355,22 +351,18 @@ class ThinkRouter:
         if cache_result:
             clf_result    = None
             domain_result = None
-            cached_domain = cache_result.domain
-            cached_tier   = cache_result.tier
             cached_model  = cache_result.model
             cached_prov   = cache_result.provider
         else:
             clf_result    = self._clf.predict(query)
             domain_result = None
-            cached_domain = Domain.GENERAL
-            cached_tier   = clf_result.tier
             cached_model  = model or self.model
             cached_prov   = self.provider
 
             if self.domain_routing:
                 domain_result = self._domain_clf.predict(query)
                 if domain_result.confidence >= self.domain_min_confidence:
-                    cached_domain = domain_result.domain
+                    _cached_domain = domain_result.domain  # noqa: F841
 
         # Step 4: model registry
         model_target:   Optional[ModelTarget] = None

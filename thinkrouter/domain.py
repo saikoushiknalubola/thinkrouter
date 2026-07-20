@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 
 # ── Domain enum ────────────────────────────────────────────────────────────

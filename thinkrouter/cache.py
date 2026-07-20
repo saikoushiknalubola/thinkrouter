@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -59,7 +59,7 @@ from .domain import Domain
 
 if TYPE_CHECKING:
     import numpy as np
-    from .atlas import Atlas, AtlasRecord
+    from .atlas import Atlas
     from .embedder import BaseEmbedder
 
 
