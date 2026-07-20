@@ -1,6 +1,6 @@
 <div align="center">
 
-![ThinkRouter](https://raw.githubusercontent.com/saikoushiknalubola/thinkrouter/main/assets/thinkrouter_logo.png)
+<img src="https://raw.githubusercontent.com/saikoushiknalubola/thinkrouter/main/assets/thinkrouter_logo.png" alt="ThinkRouter" width="480"/>
 
 <br/>
 
@@ -10,9 +10,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing)
 
-**Route every LLM query to the right model. Automatically.**
+**Semantic query routing for LLM systems.**
 
 [**Live Demo**](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing) · [**PyPI**](https://pypi.org/project/thinkrouter) · [**Issues**](https://github.com/saikoushiknalubola/thinkrouter/issues)
+
+**Semantic routing · Domain specialisation · Compute budgeting · Query topology atlas**
 
 </div>
 
@@ -20,7 +22,7 @@
 
 ## What is ThinkRouter?
 
-ThinkRouter is a pre-inference routing layer that sits between your application and any LLM API. Before the first token is sent, it makes two decisions per query — in under 2ms:
+ThinkRouter is a semantic routing layer that sits between your application and any LLM API. Before the first token is sent, it embeds the query, checks a semantic cache, and — on a miss — classifies its domain and complexity in under 2ms:
 
 **Domain routing** — which specialist model knows this subject best?  
 **Complexity routing** — how much reasoning compute does this actually need?
@@ -62,7 +64,7 @@ Reasoning models apply the same 8,000-token thinking budget to `"What is 2+3?"` 
 
 ### Provider-neutral by design
 
-OpenAI routes to OpenAI models. Anthropic routes to Anthropic models. Neither has commercial incentive to route away from their own inference. ThinkRouter has no such conflict — it routes to whatever model produces the best outcome for each specific query, across any provider.
+OpenAI routes to OpenAI models. Anthropic routes to Anthropic models. Neither has commercial incentive to route away from their own inference. ThinkRouter has no such conflict — it routes using semantic classification of each query to whatever model produces the best outcome, across any provider. The routing decisions accumulate in a local atlas, making the semantic cache smarter with every query processed.
 
 ---
 

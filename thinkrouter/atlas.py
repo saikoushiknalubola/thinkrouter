@@ -420,6 +420,7 @@ class Atlas:
         return self._row_to_record(r) if r else None
 
     def _row_to_record(self, r) -> AtlasRecord:
+        ts = r["timestamp"]
         return AtlasRecord(
             id=r["id"],
             query_hash=r["query_hash"],
@@ -429,7 +430,7 @@ class Atlas:
             provider=r["provider"],
             quality_score=r["quality_score"],
             latency_ms=r["latency_ms"],
-            timestamp=datetime.fromisoformat(r["timestamp"]),
+            timestamp=datetime.fromisoformat(ts) if ts else datetime.now(timezone.utc),
             query_preview=r["query_preview"],
         )
 
