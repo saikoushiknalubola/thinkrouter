@@ -352,61 +352,59 @@ class Atlas:
         """
         Find k nearest neighbours to a query embedding.
 
-        This is the core operation for Phase 3 semantic caching.
-        Cosine similarity over the full embedding matrix — O(n·d) where
-        n = atlas size, d = embedding dim. Fast for n < 1M on CPU.
-
-        Parameters
-        ----------
-        embedding  : Query embedding, float32 shape (dim,).
-        k          : Maximum number of results to return.
-        min_score  : Minimum cosine similarity threshold.
-        domain     : If provided, filter results to this domain only.
-
-        Returns
-        -------
-        List[SimilarResult] sorted by similarity descending.
+        Cosine similarity over the full embedding matrix — O(n·d).
+        All SQLite access runs inside self._lock to guarantee
+        thread safety when multiple threads call find_similar concurrently.
         """
-        if len(self._embeddings) == 0:
-            return []
+        with self._lock:
+            if len(self._embeddings) == 0:
+                return []
+            emb_matrix = self._embeddings.copy()
 
         vec = np.asarray(embedding, dtype=np.float32)
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
 
-        with self._lock:
-            emb_matrix = self._embeddings.copy()
-
-        # Cosine similarity = dot product of unit vectors
-        sims = emb_matrix @ vec  # shape (n,)
-
-        # Filter by minimum similarity
+        # Pure numpy — no lock needed
+        sims = emb_matrix @ vec
         candidate_rows = np.where(sims >= min_score)[0]
         if len(candidate_rows) == 0:
             return []
 
-        # Sort by similarity descending and take top k
         sorted_rows = candidate_rows[np.argsort(-sims[candidate_rows])][:k]
 
+        # All DB reads inside the lock — single shared connection, single thread
         results = []
-        for row in sorted_rows:
-            row_int = int(row)
-            sim     = float(sims[row_int])
-            rec     = self._fetch_by_row(row_int)
-            if rec is None:
-                continue
-            if domain and rec.domain != domain:
-                continue
-            results.append(SimilarResult(record=rec, similarity=sim))
+        with self._lock:
+            for row in sorted_rows:
+                row_int = int(row)
+                sim     = float(sims[row_int])
+                try:
+                    cur = self._conn.execute(
+                        "SELECT * FROM records WHERE embedding_row=?", (row_int,)
+                    )
+                    r = cur.fetchone()
+                except Exception:
+                    continue
+                if r is None:
+                    continue
+                rec = self._row_to_record(r)
+                if domain and rec.domain != domain:
+                    continue
+                results.append(SimilarResult(record=rec, similarity=sim))
 
         return results
 
     def _fetch_by_row(self, row: int) -> Optional[AtlasRecord]:
-        cur = self._conn.execute(
-            "SELECT * FROM records WHERE embedding_row=?", (row,)
-        )
-        r = cur.fetchone()
+        """Internal — callers must hold self._lock."""
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM records WHERE embedding_row=?", (row,)
+            )
+            r = cur.fetchone()
+        except Exception:
+            return None
         if r is None:
             return None
         return self._row_to_record(r)
