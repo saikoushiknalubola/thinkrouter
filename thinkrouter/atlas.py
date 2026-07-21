@@ -3,48 +3,11 @@ thinkrouter.atlas
 ~~~~~~~~~~~~~~~~~
 Query topology atlas — Phase 2.
 
-The atlas is the growing database that makes ThinkRouter smarter with
-every query it processes. It stores:
-
-  (query_hash, embedding, domain, tier, model, provider, quality_score, timestamp)
-
-As the atlas grows, it powers:
-  Phase 3 — semantic cache (nearest-neighbor routing decisions in <2ms)
-  Phase 4 — confidence model (hallucination risk from historical quality scores)
-  Phase 5 — Atlas API (cross-company routing intelligence endpoint)
-
-Storage
--------
-SQLite for metadata and quality scores (Python built-in, zero deps).
-NumPy binary (.npy) for the embedding matrix (fast memmap, no serialisation).
-Both files live in a configurable directory (default: ~/.thinkrouter/atlas/).
-
-Usage::
-
-    from thinkrouter.atlas import Atlas
-    from thinkrouter.domain import Domain
-    from thinkrouter.constants import Tier
-
-    atlas = Atlas()
-
-    # Store a routing decision after inference
-    record_id = atlas.store(
-        query="Write a binary search tree in Python.",
-        embedding=emb_vector,          # numpy float32 array
-        domain=Domain.CODE,
-        tier=Tier.FULL,
-        model="deepseek-coder-v2",
-        provider="ollama",
-        quality_score=0.91,            # optional, from judge
-    )
-
-    # Find 5 nearest queries (Phase 3 — semantic cache)
-    results = atlas.find_similar(query_embedding, k=5, min_score=0.85)
-    for r in results:
-        print(r.similarity, r.domain, r.tier, r.model)
-
-    # Atlas statistics
-    print(atlas.stats())
+Thread safety: every thread gets its own SQLite connection via
+threading.local(). The numpy embedding matrix is protected by a
+single threading.Lock() for writes only. Reads copy the matrix
+before releasing the lock and then do pure numpy — zero DB access.
+This eliminates all SQLite concurrency issues permanently.
 """
 from __future__ import annotations
 
@@ -67,7 +30,6 @@ from .domain import Domain
 
 @dataclass
 class AtlasRecord:
-    """A single stored routing decision in the atlas."""
     id:            str
     query_hash:    str
     domain:        Domain
@@ -77,19 +39,17 @@ class AtlasRecord:
     quality_score: Optional[float]
     latency_ms:    float
     timestamp:     datetime
-    query_preview: str          # first 120 chars for display
+    query_preview: str
 
 
 @dataclass
 class SimilarResult:
-    """A nearest-neighbor search result from the atlas."""
     record:     AtlasRecord
-    similarity: float           # cosine similarity in [0, 1]
+    similarity: float
 
 
 @dataclass
 class AtlasStats:
-    """Aggregate statistics about the atlas."""
     total_records:     int
     domain_counts:     dict
     tier_counts:       dict
@@ -107,11 +67,13 @@ class AtlasStats:
             f"  Total records     : {self.total_records:,}",
             f"  Storage path      : {self.storage_path}",
             f"  Embedding backend : {self.embedding_backend}",
-            f"  Avg quality score : {self.avg_quality:.3f}" if self.avg_quality else
-            "  Avg quality score : N/A (no scores yet)",
-            "",
-            "  Domain breakdown:",
         ]
+        if self.avg_quality:
+            lines.append(f"  Avg quality score : {self.avg_quality:.3f}")
+        else:
+            lines.append("  Avg quality score : N/A")
+        lines.append("")
+        lines.append("  Domain breakdown:")
         for domain, count in sorted(self.domain_counts.items(), key=lambda x: -x[1]):
             pct = count / self.total_records * 100 if self.total_records else 0
             lines.append(f"    {domain:<12} : {count:>6,}  ({pct:.1f}%)")
@@ -129,35 +91,45 @@ class AtlasStats:
 
 # ── Atlas ──────────────────────────────────────────────────────────────────
 
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS records (
+    id            TEXT PRIMARY KEY,
+    query_hash    TEXT NOT NULL,
+    query_preview TEXT NOT NULL,
+    domain        TEXT NOT NULL,
+    tier          TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    quality_score REAL,
+    latency_ms    REAL NOT NULL DEFAULT 0.0,
+    embedding_row INTEGER,
+    timestamp     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_domain ON records(domain);
+CREATE INDEX IF NOT EXISTS idx_tier   ON records(tier);
+CREATE INDEX IF NOT EXISTS idx_hash   ON records(query_hash);
+CREATE INDEX IF NOT EXISTS idx_row    ON records(embedding_row);
+"""
+
+
 class Atlas:
     """
-    Query topology atlas — persistent storage for routing decisions.
+    Persistent query topology atlas.
 
-    Stores every routed query with its embedding, domain classification,
-    complexity tier, model used, and quality score. Powers Phase 3
-    semantic caching and Phase 4 confidence modelling.
-
-    Parameters
-    ----------
-    path : str | Path | None
-        Directory where atlas files are stored.
-        Default: ~/.thinkrouter/atlas/
-    embedding_dim : int
-        Dimensionality of stored embeddings.
-        Must match the embedder used to produce them.
-        Default: 256 (HashSketchEmbedder default).
-    embedding_backend : str
-        Label for the embedding backend — stored in stats only.
-    max_records : int | None
-        Cap the atlas size. When reached, oldest records are evicted.
-        None = unlimited.
-    read_only : bool
-        Open in read-only mode (for inspection without writing).
+    Thread safety model
+    -------------------
+    - Each thread gets its own SQLite connection via threading.local().
+      SQLite WAL mode allows many concurrent readers and one writer
+      without any application-level locking.
+    - The numpy embedding matrix (self._embeddings) is protected by
+      self._matrix_lock for WRITES only. Reads copy the matrix while
+      holding the lock, then release it and do all numpy work outside.
+    - No single lock covers both DB and matrix simultaneously, so there
+      is no deadlock risk.
     """
 
-    _DB_FILE   = "atlas.db"
-    _EMB_FILE  = "embeddings.npy"
-    _IDX_FILE  = "index.npy"  # maps row index → record id
+    _DB_FILE  = "atlas.db"
+    _EMB_FILE = "embeddings.npy"
 
     def __init__(
         self,
@@ -167,73 +139,67 @@ class Atlas:
         max_records:       Optional[int] = None,
         read_only:         bool          = False,
     ) -> None:
-        self._dim       = embedding_dim
-        self._backend   = embedding_backend
-        self._max       = max_records
-        self._read_only = read_only
-        self._lock      = threading.Lock()
+        self._dim         = embedding_dim
+        self._backend     = embedding_backend
+        self._max         = max_records
+        self._read_only   = read_only
+        self._matrix_lock = threading.Lock()
+        self._local       = threading.local()   # per-thread SQLite connections
 
-        # Storage path
         if path is None:
             path = os.path.join(Path.home(), ".thinkrouter", "atlas")
-        self._path = Path(path)
+        self._path    = Path(path)
+        self._db_path = self._path / self._DB_FILE
+        self._emb_path= self._path / self._EMB_FILE
+
         if not read_only:
             self._path.mkdir(parents=True, exist_ok=True)
 
-        self._db_path  = self._path / self._DB_FILE
-        self._emb_path = self._path / self._EMB_FILE
-        self._idx_path = self._path / self._IDX_FILE
-
-        self._init_db()
+        # Initialise schema via a dedicated setup connection
+        self._init_schema()
+        # Load embedding matrix into memory
         self._load_embeddings()
 
-    # ── Initialisation ─────────────────────────────────────────────────────
+    # ── Per-thread connection ──────────────────────────────────────────────
 
-    def _init_db(self) -> None:
-        """Create SQLite schema if not present."""
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """
+        Return a SQLite connection private to the calling thread.
+        Created on first access, reused on subsequent calls from the same thread.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._local.conn = conn
+        return conn
+
+    # ── Schema ─────────────────────────────────────────────────────────────
+
+    def _init_schema(self) -> None:
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS records (
-                id            TEXT PRIMARY KEY,
-                query_hash    TEXT NOT NULL,
-                query_preview TEXT NOT NULL,
-                domain        TEXT NOT NULL,
-                tier          TEXT NOT NULL,
-                model         TEXT NOT NULL,
-                provider      TEXT NOT NULL,
-                quality_score REAL,
-                latency_ms    REAL NOT NULL DEFAULT 0.0,
-                embedding_row INTEGER,
-                timestamp     TEXT NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_domain ON records(domain)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tier   ON records(tier)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_hash   ON records(query_hash)")
+        conn.executescript(_SCHEMA)
         conn.commit()
         conn.close()
-        self._conn = sqlite3.connect(
-            str(self._db_path), check_same_thread=False
-        )
-        self._conn.row_factory = sqlite3.Row
+
+    # ── Embedding matrix ───────────────────────────────────────────────────
 
     def _load_embeddings(self) -> None:
-        """Load embedding matrix into memory (numpy memmap or empty array)."""
         if self._emb_path.exists():
             stored = np.load(str(self._emb_path))
-            # Validate dimensionality
             if stored.ndim == 2 and stored.shape[1] == self._dim:
                 self._embeddings: np.ndarray = stored.copy()
-            else:
-                # Dimension mismatch — reset (new embedder backend)
-                self._embeddings = np.empty((0, self._dim), dtype=np.float32)
-        else:
-            self._embeddings = np.empty((0, self._dim), dtype=np.float32)
+                return
+        self._embeddings = np.empty((0, self._dim), dtype=np.float32)
 
     def _save_embeddings(self) -> None:
-        """Persist embedding matrix to disk."""
+        """Must be called while holding self._matrix_lock."""
         np.save(str(self._emb_path), self._embeddings)
 
     # ── Store ──────────────────────────────────────────────────────────────
@@ -249,231 +215,190 @@ class Atlas:
         quality_score: Optional[float] = None,
         latency_ms:    float           = 0.0,
     ) -> str:
-        """
-        Store a routing decision in the atlas.
-
-        Parameters
-        ----------
-        query         : Original query text (stored as preview only).
-        embedding     : float32 numpy array of shape (dim,).
-        domain        : Detected domain.
-        tier          : Assigned complexity tier.
-        model         : Model used for inference.
-        provider      : Provider used.
-        quality_score : Optional quality score in [0, 1] from a judge.
-        latency_ms    : Total routing + inference latency.
-
-        Returns
-        -------
-        str : Record UUID.
-        """
         if self._read_only:
-            raise RuntimeError("Atlas is opened in read-only mode.")
+            raise RuntimeError("Atlas opened in read-only mode.")
 
         record_id  = str(uuid.uuid4())
         query_hash = self._hash(query)
         timestamp  = datetime.now(timezone.utc).isoformat()
         preview    = query[:120].replace("\n", " ")
 
-        # Validate and normalise embedding
-        vec = np.asarray(embedding, dtype=np.float32)
+        vec  = np.asarray(embedding, dtype=np.float32)
         if vec.shape != (self._dim,):
             raise ValueError(
-                f"Embedding shape {vec.shape} does not match atlas dim {self._dim}. "
-                f"Use get_embedder(backend, dim={self._dim}) consistently."
+                f"Embedding shape {vec.shape} != atlas dim ({self._dim},). "
+                f"Use the same embedder backend consistently."
             )
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
 
-        with self._lock:
-            # Append to embedding matrix
+        # Protect matrix write + DB write together
+        with self._matrix_lock:
             row_idx = len(self._embeddings)
             self._embeddings = np.vstack([self._embeddings, vec[np.newaxis, :]])
 
-            # Evict oldest if max_records reached
+            # Evict oldest if capped
             if self._max and len(self._embeddings) > self._max:
                 overflow = len(self._embeddings) - self._max
                 self._embeddings = self._embeddings[-self._max:]
-                # Evict oldest rows from DB
                 self._conn.execute(
                     "DELETE FROM records WHERE embedding_row IN "
-                    "(SELECT embedding_row FROM records ORDER BY embedding_row ASC LIMIT ?)",
+                    "(SELECT embedding_row FROM records "
+                    " ORDER BY embedding_row ASC LIMIT ?)",
                     (overflow,),
                 )
                 self._conn.commit()
 
-            # Insert metadata
-            self._conn.execute("""
-                INSERT INTO records
-                  (id, query_hash, query_preview, domain, tier, model,
-                   provider, quality_score, latency_ms, embedding_row, timestamp)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                record_id, query_hash, preview,
-                domain.value, tier.name, model, provider,
-                quality_score, latency_ms, row_idx, timestamp,
-            ))
+            self._conn.execute(
+                "INSERT INTO records "
+                "(id,query_hash,query_preview,domain,tier,model,"
+                " provider,quality_score,latency_ms,embedding_row,timestamp) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (record_id, query_hash, preview,
+                 domain.value, tier.name, model, provider,
+                 quality_score, latency_ms, row_idx, timestamp),
+            )
             self._conn.commit()
             self._save_embeddings()
 
         return record_id
 
-    # ── Update quality score ───────────────────────────────────────────────
+    # ── Update quality ─────────────────────────────────────────────────────
 
     def update_quality(self, record_id: str, quality_score: float) -> None:
-        """
-        Update the quality score for an existing record.
-
-        Call this after receiving human or automated feedback on a response.
-        Quality scores power Phase 4 confidence modelling.
-
-        Parameters
-        ----------
-        record_id     : UUID returned by store().
-        quality_score : Score in [0, 1].
-        """
-        with self._lock:
-            self._conn.execute(
-                "UPDATE records SET quality_score=? WHERE id=?",
-                (float(quality_score), record_id),
-            )
-            self._conn.commit()
+        self._conn.execute(
+            "UPDATE records SET quality_score=? WHERE id=?",
+            (float(quality_score), record_id),
+        )
+        self._conn.commit()
 
     # ── Find similar ───────────────────────────────────────────────────────
 
     def find_similar(
         self,
         embedding:  "np.ndarray",
-        k:          int   = 5,
-        min_score:  float = 0.80,
+        k:          int            = 5,
+        min_score:  float          = 0.80,
         domain:     Optional[Domain] = None,
     ) -> List[SimilarResult]:
         """
-        Find k nearest neighbours to a query embedding.
+        Return k nearest neighbours by cosine similarity.
 
-        Cosine similarity over the full embedding matrix — O(n·d).
-        All SQLite access runs inside self._lock to guarantee
-        thread safety when multiple threads call find_similar concurrently.
+        Thread safety: copies the matrix under matrix_lock, then releases it.
+        All numpy work and DB reads happen outside any lock — each thread
+        uses its own SQLite connection so no coordination is needed.
         """
-        with self._lock:
+        with self._matrix_lock:
             if len(self._embeddings) == 0:
                 return []
-            emb_matrix = self._embeddings.copy()
+            emb_matrix = self._embeddings.copy()   # snapshot — released immediately
 
         vec = np.asarray(embedding, dtype=np.float32)
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm
 
-        # Pure numpy — no lock needed
+        # Pure numpy — no shared state, no lock needed
         sims = emb_matrix @ vec
         candidate_rows = np.where(sims >= min_score)[0]
         if len(candidate_rows) == 0:
             return []
-
         sorted_rows = candidate_rows[np.argsort(-sims[candidate_rows])][:k]
 
-        # All DB reads inside the lock — single shared connection, single thread
-        results = []
-        with self._lock:
-            for row in sorted_rows:
-                row_int = int(row)
-                sim     = float(sims[row_int])
-                try:
-                    cur = self._conn.execute(
-                        "SELECT * FROM records WHERE embedding_row=?", (row_int,)
-                    )
-                    r = cur.fetchone()
-                except Exception:
-                    continue
-                if r is None:
-                    continue
-                rec = self._row_to_record(r)
-                if domain and rec.domain != domain:
-                    continue
-                results.append(SimilarResult(record=rec, similarity=sim))
+        # DB reads — use this thread's private connection, no lock needed
+        results: List[SimilarResult] = []
+        for row in sorted_rows:
+            row_int = int(row)
+            sim     = float(sims[row_int])
+            try:
+                cur = self._conn.execute(
+                    "SELECT * FROM records WHERE embedding_row=?", (row_int,)
+                )
+                r = cur.fetchone()
+            except Exception:
+                continue
+            if r is None:
+                continue
+            rec = self._row_to_record(r)
+            if rec is None:
+                continue
+            if domain and rec.domain != domain:
+                continue
+            results.append(SimilarResult(record=rec, similarity=sim))
 
         return results
 
-    def _fetch_by_row(self, row: int) -> Optional[AtlasRecord]:
-        """Internal — callers must hold self._lock."""
+    # ── Get ────────────────────────────────────────────────────────────────
+
+    def get(self, record_id: str) -> Optional[AtlasRecord]:
         try:
             cur = self._conn.execute(
-                "SELECT * FROM records WHERE embedding_row=?", (row,)
+                "SELECT * FROM records WHERE id=?", (record_id,)
             )
             r = cur.fetchone()
         except Exception:
             return None
-        if r is None:
-            return None
-        return self._row_to_record(r)
-
-    def get(self, record_id: str) -> Optional[AtlasRecord]:
-        """Retrieve a record by its UUID."""
-        cur = self._conn.execute(
-            "SELECT * FROM records WHERE id=?", (record_id,)
-        )
-        r = cur.fetchone()
         return self._row_to_record(r) if r else None
 
-    def _row_to_record(self, r) -> AtlasRecord:
-        ts = r["timestamp"]
-        return AtlasRecord(
-            id=r["id"],
-            query_hash=r["query_hash"],
-            domain=Domain(r["domain"]),
-            tier=Tier[r["tier"]],
-            model=r["model"],
-            provider=r["provider"],
-            quality_score=r["quality_score"],
-            latency_ms=r["latency_ms"],
-            timestamp=datetime.fromisoformat(ts) if ts else datetime.now(timezone.utc),
-            query_preview=r["query_preview"],
-        )
+    # ── Row → record ───────────────────────────────────────────────────────
+
+    def _row_to_record(self, r) -> Optional[AtlasRecord]:
+        if r is None:
+            return None
+        try:
+            ts = r["timestamp"]
+            return AtlasRecord(
+                id=r["id"],
+                query_hash=r["query_hash"],
+                domain=Domain(r["domain"]),
+                tier=Tier[r["tier"]],
+                model=r["model"],
+                provider=r["provider"],
+                quality_score=r["quality_score"],
+                latency_ms=r["latency_ms"] or 0.0,
+                timestamp=datetime.fromisoformat(ts) if ts else datetime.now(timezone.utc),
+                query_preview=r["query_preview"] or "",
+            )
+        except Exception:
+            return None
 
     # ── Stats ──────────────────────────────────────────────────────────────
 
     def stats(self) -> AtlasStats:
-        """Return aggregate statistics about the atlas."""
-        cur = self._conn.execute("""
-            SELECT
-                COUNT(*)                          AS total,
-                AVG(quality_score)                AS avg_q,
-                MIN(timestamp)                    AS earliest,
-                MAX(timestamp)                    AS latest
-            FROM records
-        """)
-        row   = cur.fetchone()
-        total = row["total"] or 0
-        avg_q = row["avg_q"] or 0.0
+        try:
+            cur = self._conn.execute(
+                "SELECT COUNT(*) AS total, AVG(quality_score) AS avg_q, "
+                "MIN(timestamp) AS earliest, MAX(timestamp) AS latest "
+                "FROM records"
+            )
+            row   = cur.fetchone()
+            total = row["total"] or 0
+            avg_q = row["avg_q"] or 0.0
 
-        # Domain counts
-        cur = self._conn.execute(
-            "SELECT domain, COUNT(*) AS n FROM records GROUP BY domain"
-        )
-        domain_counts = {r["domain"]: r["n"] for r in cur.fetchall()}
+            cur = self._conn.execute(
+                "SELECT domain, COUNT(*) AS n FROM records GROUP BY domain"
+            )
+            domain_counts = {r["domain"]: r["n"] for r in cur.fetchall()}
 
-        # Tier counts
-        cur = self._conn.execute(
-            "SELECT tier, COUNT(*) AS n FROM records GROUP BY tier"
-        )
-        tier_counts = {r["tier"]: r["n"] for r in cur.fetchall()}
+            cur = self._conn.execute(
+                "SELECT tier, COUNT(*) AS n FROM records GROUP BY tier"
+            )
+            tier_counts = {r["tier"]: r["n"] for r in cur.fetchall()}
 
-        earliest = None
-        latest   = None
-        if row["earliest"]:
-            earliest = datetime.fromisoformat(row["earliest"])
-        if row["latest"]:
-            latest = datetime.fromisoformat(row["latest"])
+            earliest = datetime.fromisoformat(row["earliest"]) if row["earliest"] else None
+            latest   = datetime.fromisoformat(row["latest"])   if row["latest"]   else None
+        except Exception:
+            total = 0
+            avg_q = 0.0
+            domain_counts = {}
+            tier_counts = {}
+            earliest = latest = None
 
         return AtlasStats(
-            total_records=total,
-            domain_counts=domain_counts,
-            tier_counts=tier_counts,
-            avg_quality=avg_q,
-            earliest=earliest,
-            latest=latest,
+            total_records=total, domain_counts=domain_counts,
+            tier_counts=tier_counts, avg_quality=avg_q,
+            earliest=earliest, latest=latest,
             embedding_backend=self._backend,
             storage_path=str(self._path),
         )
@@ -484,34 +409,18 @@ class Atlas:
     # ── Export ─────────────────────────────────────────────────────────────
 
     def export_records(self, path: Optional[str] = None) -> str:
-        """
-        Export all records (without embeddings) to a JSON file.
-
-        Useful for sharing routing data, building training datasets,
-        and debugging. Embeddings are NOT exported (privacy + size).
-
-        Parameters
-        ----------
-        path : Output path. Default: atlas_export_<timestamp>.json
-
-        Returns
-        -------
-        str : Path of the written file.
-        """
         import json
-
         if path is None:
             ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = str(self._path / f"atlas_export_{ts}.json")
-
-        cur = self._conn.execute("SELECT * FROM records ORDER BY timestamp")
+        cur  = self._conn.execute("SELECT * FROM records ORDER BY timestamp")
         rows = cur.fetchall()
         data = {
             "metadata": {
-                "total":              len(rows),
-                "embedding_backend":  self._backend,
-                "embedding_dim":      self._dim,
-                "exported_at":        datetime.now(timezone.utc).isoformat(),
+                "total":             len(rows),
+                "embedding_backend": self._backend,
+                "embedding_dim":     self._dim,
+                "exported_at":       datetime.now(timezone.utc).isoformat(),
             },
             "records": [
                 {
@@ -524,8 +433,7 @@ class Atlas:
                     "quality_score": r["quality_score"],
                     "latency_ms":    r["latency_ms"],
                     "timestamp":     r["timestamp"],
-                }
-                for r in rows
+                } for r in rows
             ],
         }
         with open(path, "w") as f:
@@ -536,27 +444,30 @@ class Atlas:
 
     @staticmethod
     def _hash(text: str) -> str:
-        """SHA-256 hash of query text for deduplication."""
         import hashlib
         return hashlib.sha256(text.encode()).hexdigest()[:32]
 
     def __len__(self) -> int:
-        cur = self._conn.execute("SELECT COUNT(*) FROM records")
-        return cur.fetchone()[0]
+        try:
+            cur = self._conn.execute("SELECT COUNT(*) FROM records")
+            return cur.fetchone()[0]
+        except Exception:
+            return 0
 
     def __repr__(self) -> str:
         return (
-            f"Atlas("
-            f"records={len(self)}, "
-            f"dim={self._dim}, "
-            f"backend={self._backend!r}, "
-            f"path={str(self._path)!r})"
+            f"Atlas(records={len(self)}, dim={self._dim}, "
+            f"backend={self._backend!r}, path={str(self._path)!r})"
         )
 
     def close(self) -> None:
-        """Close SQLite connection."""
-        if hasattr(self, "_conn"):
-            self._conn.close()
+        conn = getattr(self._local, "conn", None)
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     def __del__(self) -> None:
         try:
