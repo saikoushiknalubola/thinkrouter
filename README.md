@@ -14,7 +14,7 @@
 
 [**Live Demo**](https://colab.research.google.com/drive/1D7lZVyRauv3oeQU7QRSilMcwBGqunG79?usp=sharing) · [**PyPI**](https://pypi.org/project/thinkrouter) · [**Issues**](https://github.com/saikoushiknalubola/thinkrouter/issues)
 
-**Semantic routing · Domain specialisation · Compute budgeting · Query topology atlas**
+**Semantic routing · Domain specialisation · Confidence modelling · Cost tracking · Fallback chains**
 
 </div>
 
@@ -181,6 +181,86 @@ client.cache.print_stats()
   Avg hit latency    : 1.24 ms
 ```
 
+
+### Confidence model (Phase 4)
+
+```python
+from thinkrouter import ThinkRouter
+
+client = ThinkRouter(provider="openai", confidence_enabled=True)
+
+# Assess hallucination risk before sending to the model
+result = client.assess_confidence(
+    "What happened in this week's G7 summit? Cite your sources."
+)
+print(result.risk_score)        # 0.82 — high risk
+print(result.recommendation)   # Recommendation.RAG
+print(result.reason)           # "Likely requires post-training knowledge"
+print(result.is_high_risk)     # True
+
+# Risk is automatically included in every RouterResponse
+r = client.chat("What is the current stock price of Apple?")
+print(r.confidence_result.risk_score)       # 0.74
+print(r.confidence_result.recommendation)  # Recommendation.RAG
+print(r.is_high_risk)                       # True
+```
+
+### Cost tracking
+
+```python
+client = ThinkRouter(provider="openai", cost_tracking=True)
+
+r = client.chat("Write a binary search tree in Python.")
+print(r.cost_usd)              # 0.000034  (routed to deepseek via Ollama = free)
+
+# After several calls
+client.cost_tracker.print_summary()
+```
+
+```
+  ThinkRouter — Cost Dashboard
+  ────────────────────────────────────────────────
+  Total calls           : 47
+  Actual spend          : $0.002341
+  GPT-4o baseline       : $0.018720
+  Saved                 : $0.016379  (87.5%)
+  Free calls (Ollama)   : 31  (66.0%)
+
+  Cost by domain:
+    legal        : $0.001200  (8 calls)
+    code         : $0.000000  (18 calls)
+    math         : $0.000000  (12 calls)
+```
+
+```python
+# Monthly cost projection
+print(client.cost_tracker.summary().daily_projection(10_000))
+# At 10,000 calls/day:
+#   Actual spend    : $14.92/month
+#   Baseline spend  : $118.80/month
+#   Monthly savings : $103.88/month
+```
+
+### Fallback chains
+
+```python
+# If OpenAI is rate-limited → automatically retries on Anthropic
+# If Anthropic fails → falls over to Ollama (free, local)
+client = ThinkRouter(
+    provider="openai",
+    fallback_providers=["anthropic", "ollama"],
+    fallback_api_keys={"anthropic": "sk-ant-..."},
+)
+
+r = client.chat("Write a quicksort in Python.")
+print(r.provider)           # whichever provider actually responded
+print(r.fallback_used)      # True if primary provider failed
+if r.fallback_result:
+    print(r.fallback_result.attempted)   # ["openai", "anthropic"]
+    print(r.fallback_result.succeeded)   # "anthropic"
+    print(r.fallback_result.errors)      # ["openai: rate limit exceeded"]
+```
+
 ### Streaming
 
 ```python
@@ -278,44 +358,121 @@ client = ThinkRouter(provider="ollama")  # zero cost, fully offline
 
 ```python
 ThinkRouter(
-    provider              = "openai",      # "openai" | "anthropic" | "ollama" | "generic"
-    api_key               = None,          # falls back to env var
-    model                 = None,          # overridden by domain routing
-    classifier_backend    = "heuristic",   # "heuristic" | "distilbert"
-    confidence_threshold  = 0.75,
-    domain_routing        = True,
-    domain_min_confidence = 0.45,
-    preferred_provider    = None,          # "openai" | "anthropic" | "ollama"
-    registry              = None,          # custom ModelRegistry
-    atlas_enabled         = True,          # Phase 2 storage
-    cache_enabled         = True,          # Phase 3 semantic cache
-    cache_threshold       = 0.92,          # cosine similarity threshold
-    cache_min_quality     = 0.70,          # min quality score to use cached decision
-    cache_min_atlas_size  = 50,            # min records before cache activates
-    embedder_backend      = "hash",        # "hash" | "openai" | "local"
-    max_retries           = 3,
-    verbose               = False,
-    ollama_url            = "http://localhost:11434",
+    provider               = "openai",   # "openai" | "anthropic" | "ollama" | "generic"
+    api_key                = None,        # falls back to env var
+    model                  = None,        # overridden by domain routing
+    classifier_backend     = "heuristic", # "heuristic" | "distilbert"
+    confidence_threshold   = 0.75,
+    domain_routing         = True,
+    domain_min_confidence  = 0.45,
+    preferred_provider     = None,        # "openai" | "anthropic" | "ollama"
+    registry               = None,        # custom ModelRegistry
+    # Phase 2 — Atlas
+    atlas_enabled          = True,
+    embedder_backend       = "hash",      # "hash" | "openai" | "local"
+    # Phase 3 — Semantic cache
+    cache_enabled          = True,
+    cache_threshold        = 0.92,        # cosine similarity threshold
+    cache_min_quality      = 0.70,        # min quality score on cached records
+    cache_min_atlas_size   = 50,          # min records before cache activates
+    # Phase 4 — Confidence model
+    confidence_enabled     = True,
+    confidence_backend     = "heuristic", # upgrades to "atlas" when atlas is large
+    escalation_model       = None,        # model to use on Recommendation.ESCALATE
+    # Cost tracking
+    cost_tracking          = True,
+    # Fallback chain
+    fallback_providers     = None,        # e.g. ["anthropic", "ollama"]
+    fallback_api_keys      = None,        # {"anthropic": "sk-ant-..."}
+    max_retries            = 3,
+    verbose                = False,
+    ollama_url             = "http://localhost:11434",
 )
 ```
 
 ### RouterResponse
 
 ```python
-response.content           # Generated text
-response.routing           # ClassifierResult — complexity decision (None on cache hit)
-response.domain_result     # DomainResult — domain detection
-response.model_target      # ModelTarget — specialist model selected
-response.cache_result      # CacheResult — cache hit details (None on miss)
-response.was_cached        # bool — True when semantic cache was used
-response.tier              # Routing tier regardless of source
-response.provider          # Provider used
-response.model             # Model identifier used
-response.usage_tokens      # {"prompt_tokens": N, "completion_tokens": M, ...}
-response.record_id         # Atlas UUID — use with update_quality()
-response.reasoning_effort  # OpenAI reasoning_effort (o1/o3 only)
-response.thinking_budget   # Anthropic budget_tokens applied
+response.content              # Generated text
+response.routing              # ClassifierResult — complexity decision (None on cache hit)
+response.domain_result        # DomainResult — domain detection
+response.model_target         # ModelTarget — specialist model selected
+response.cache_result         # CacheResult — cache hit details (None on miss)
+response.confidence_result    # ConfidenceResult — hallucination risk assessment
+response.cost_record          # CostRecord — actual USD cost of this call
+response.fallback_result      # FallbackResult — fallback chain metadata (None if not used)
+response.was_cached           # bool — True when semantic cache was used
+response.is_high_risk         # bool — True when hallucination risk >= 0.65
+response.fallback_used        # bool — True if primary provider failed over
+response.cost_usd             # float — actual USD cost (0.0 for Ollama)
+response.tier                 # Routing tier regardless of source
+response.provider             # Provider that responded
+response.model                # Model identifier used
+response.usage_tokens         # {"prompt_tokens": N, "completion_tokens": M, ...}
+response.record_id            # Atlas UUID — use with update_quality()
+response.reasoning_effort     # OpenAI reasoning_effort (o1/o3 only)
+response.thinking_budget      # Anthropic budget_tokens applied
 ```
+
+
+### Confidence model (Phase 4)
+
+`HeuristicConfidenceModel` scores every query for hallucination risk before
+inference. The score drives a `Recommendation`:
+
+| Risk score | Recommendation | Action |
+|-----------|---------------|--------|
+| 0.00–0.35 | `PROCEED` | Low risk — send as-is |
+| 0.35–0.55 | `VERIFY` | Moderate — flag response for review |
+| 0.55–0.75 | `RAG` | High risk — augment with retrieval first |
+| 0.75–0.90 | `ESCALATE` | Very high — route to stronger model |
+| 0.90–1.00 | `ABSTAIN` | Extreme — do not send |
+
+High-risk signals: recent events, citation requests, specific prices/roles, medical/legal specifics.
+
+Safe signals: mathematical proofs, historical facts, code generation, conceptual explanations.
+
+When the Atlas accumulates 200+ labelled records via `update_quality()`, `AtlasConfidenceModel`
+activates automatically — deriving risk from the average quality score of semantically
+similar past queries. This is the empirical confidence signal that heuristics cannot provide.
+
+### Cost tracking
+
+```python
+from thinkrouter.cost import get_cost_usd, MODEL_PRICING
+
+# Check pricing for any model
+print(get_cost_usd("gpt-4o", input_tokens=1_000_000, output_tokens=0))  # $2.50
+print(get_cost_usd("deepseek-coder-v2", 1_000_000, 1_000_000))          # $0.00 (Ollama)
+
+# All tracked prices
+print(MODEL_PRICING)
+```
+
+### Fallback chains
+
+```python
+# Build chain programmatically
+from thinkrouter.fallback import FallbackChain
+from thinkrouter.providers import OpenAIAdapter, AnthropicAdapter
+
+chain = FallbackChain(
+    adapters=[
+        ("openai",    OpenAIAdapter("sk-...")),
+        ("anthropic", AnthropicAdapter("sk-ant-...")),
+    ],
+    models=["gpt-4o", "claude-sonnet-4-6"],
+    retry_delay=0.5,  # seconds between attempts
+)
+
+content, raw, usage, xparam, fb = chain.call(
+    messages=[{"role":"user","content":"test"}],
+    tier=Tier.FULL,
+)
+```
+
+Permanent errors (401 auth, 404 model not found) raise immediately — switching providers
+won't fix them. Transient errors (429 rate limit, 5xx server errors) move to the next provider.
 
 ### Quality feedback loop
 
@@ -368,7 +525,7 @@ python examples/benchmark.py --provider ollama --no-judge
 | Financial | 76/100 | FinMA-7B | **80/100** | 10× cheaper |
 | General | 89/100 | GPT-4o | 89/100 | Baseline |
 
-*Scores are directional estimates based on published domain benchmarks.*
+*Scores are directional estimates based on published domain benchmarks. Ollama models (deepseek-coder-v2, Qwen2.5-Math, medllama2, llama3.1) run locally at zero API cost.*
 
 ---
 
@@ -425,7 +582,7 @@ pytest tests/ -v
 ```
 
 ```
-79 passed in 0.99s
+100 passed in 0.41s
 ```
 
 ---
