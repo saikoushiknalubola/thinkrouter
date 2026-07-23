@@ -1,36 +1,34 @@
 """
 thinkrouter.router
 ~~~~~~~~~~~~~~~~~~
-ThinkRouter v0.6.0 — Phase 3: Semantic Cache integrated.
+ThinkRouter v0.7.0 — Phase 4 advanced features.
 
-Before running any classifier, ThinkRouter checks the atlas for a
-previous query with the same semantic intent. On a hit, the stored
-routing decision is returned in under 2ms — skipping both classifiers.
-On a miss, the normal Phase 1 + Phase 2 pipeline runs.
-
-New in v0.6.0:
-  - SemanticCache integrated into every chat() / achat() call
-  - Cache hits tracked in RouterResponse.cache_result
-  - ThinkRouter.cache exposes the SemanticCache instance
-  - cache_enabled / cache_threshold / cache_min_quality config options
-  - Usage dashboard shows cache hit rate alongside savings
+New in v0.7.0:
+  - Confidence model: hallucination risk prediction before every call
+  - Cost tracker: real USD spend tracked per routing decision
+  - Fallback chain: automatic failover across providers
+  - RouterResponse.confidence_result, .cost_usd, .fallback_result
+  - ThinkRouter.cost_tracker, .confidence_model
 """
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .cache import CacheResult, SemanticCache
 from .classifier import BaseClassifier, ClassifierResult, get_classifier
+from .confidence import ConfidenceResult, HeuristicConfidenceModel, get_confidence_model
 from .config import Config, DEFAULT_CONFIG
 from .constants import (
     TIER_TOKEN_BUDGETS,
     ProviderLiteral,
     Tier,
 )
+from .cost import CostRecord, CostTracker
 from .domain import Domain, DomainClassifier, DomainResult
 from .exceptions import ConfigurationError
+from .fallback import FallbackChain, FallbackResult
 from .providers import AnthropicAdapter, OpenAIAdapter
 from .registry import DEFAULT_REGISTRY, ModelRegistry, ModelTarget
 from .usage import UsageTracker
@@ -41,44 +39,60 @@ from .usage import UsageTracker
 @dataclass
 class RouterResponse:
     """
-    Unified response from ThinkRouter v0.6.0.
+    Unified response from ThinkRouter v0.7.0.
 
     Attributes
     ----------
-    content          : Generated text.
-    routing          : Complexity ClassifierResult (None on cache hit).
-    domain_result    : Domain DomainResult (None on cache hit).
-    model_target     : ModelTarget selected.
-    cache_result     : CacheResult if routed from semantic cache, else None.
-    raw              : Original provider response.
-    provider         : Provider used.
-    model            : Model identifier used.
-    usage_tokens     : Token usage dict.
-    record_id        : Atlas record UUID.
-    reasoning_effort : OpenAI reasoning_effort applied.
-    thinking_budget  : Anthropic thinking budget_tokens applied.
+    content            : Generated text.
+    routing            : Complexity ClassifierResult (None on cache hit).
+    domain_result      : Domain DomainResult (None on cache hit).
+    model_target       : ModelTarget selected.
+    cache_result       : CacheResult if semantic cache was used.
+    confidence_result  : ConfidenceResult — hallucination risk assessment.
+    cost_record        : CostRecord — actual USD cost of this call.
+    fallback_result    : FallbackResult if fallback chain was used.
+    raw                : Original provider response.
+    provider           : Provider that responded.
+    model              : Model identifier used.
+    usage_tokens       : Token usage dict.
+    record_id          : Atlas UUID — use with update_quality().
+    reasoning_effort   : OpenAI reasoning_effort applied.
+    thinking_budget    : Anthropic budget_tokens applied.
     """
-    content:          str
-    routing:          Optional[ClassifierResult]
-    domain_result:    Optional[DomainResult]
-    model_target:     Optional[ModelTarget]
-    cache_result:     Optional[CacheResult]
-    raw:              Any
-    provider:         str
-    model:            str
-    usage_tokens:     Dict[str, int]
-    record_id:        Optional[str]     = None
-    reasoning_effort: Optional[str]     = None
-    thinking_budget:  Optional[int]     = None
+    content:           str
+    routing:           Optional[ClassifierResult]
+    domain_result:     Optional[DomainResult]
+    model_target:      Optional[ModelTarget]
+    cache_result:      Optional[CacheResult]
+    confidence_result: Optional[ConfidenceResult]
+    cost_record:       Optional[CostRecord]
+    fallback_result:   Optional[FallbackResult]
+    raw:               Any
+    provider:          str
+    model:             str
+    usage_tokens:      Dict[str, int]
+    record_id:         Optional[str]     = None
+    reasoning_effort:  Optional[str]     = None
+    thinking_budget:   Optional[int]     = None
 
     @property
     def was_cached(self) -> bool:
-        """True when this response used a cached routing decision."""
         return self.cache_result is not None
 
     @property
+    def fallback_used(self) -> bool:
+        return self.fallback_result is not None and self.fallback_result.fallback_used
+
+    @property
+    def is_high_risk(self) -> bool:
+        return self.confidence_result is not None and self.confidence_result.is_high_risk
+
+    @property
+    def cost_usd(self) -> float:
+        return self.cost_record.cost_usd if self.cost_record else 0.0
+
+    @property
     def tier(self) -> Optional[Tier]:
-        """Convenience — the routing tier regardless of source."""
         if self.cache_result:
             return self.cache_result.tier
         if self.routing:
@@ -86,17 +100,19 @@ class RouterResponse:
         return None
 
     def __repr__(self) -> str:
-        src = "cache" if self.was_cached else "classifiers"
-        dom = (
+        src  = "cache" if self.was_cached else "classifiers"
+        dom  = (
             self.cache_result.domain.value if self.was_cached
             else (self.domain_result.domain.value if self.domain_result else "?")
         )
+        risk = f", risk={self.confidence_result.risk_score:.2f}" if self.confidence_result else ""
+        cost = f", cost=${self.cost_usd:.6f}" if self.cost_record else ""
+        fb   = ", fallback=True" if self.fallback_used else ""
         return (
             f"RouterResponse("
             f"tier={self.tier.name if self.tier else '?'}, "
-            f"domain={dom}, "
-            f"src={src}, "
-            f"model={self.model!r})"
+            f"domain={dom}, src={src}"
+            f"{risk}{cost}{fb}, model={self.model!r})"
         )
 
 
@@ -104,61 +120,45 @@ class RouterResponse:
 
 class ThinkRouter:
     """
-    Production-ready pre-inference routing layer — v0.6.0.
+    Production-ready semantic routing layer — v0.7.0.
 
-    Routing pipeline per query:
-      1. [Phase 3] Embed query → check SemanticCache
-         → HIT:  use cached domain + tier → skip to inference
-         → MISS: continue ↓
-      2. [Phase 1] DomainClassifier  → detect domain
-      3. [Phase 1] ComplexityClassifier → detect tier
-      4. [Phase 1] ModelRegistry.resolve() → pick specialist model
-      5. [Phase 2] Store embedding + routing decision in Atlas (background)
-      6. Provider API call → return RouterResponse
+    Full routing pipeline per query:
+      1. [Phase 3] Semantic cache check — return in <2ms on hit
+      2. [Phase 1] Domain + complexity classifiers
+      3. [Phase 1] Model registry lookup
+      4. [Phase 4] Confidence model — hallucination risk
+      5. Provider API call (with optional fallback chain)
+      6. [Phase 2] Store in Atlas (background thread)
+      7. Cost tracking
 
     Parameters
     ----------
-    provider              : "openai" | "anthropic" | "ollama" | "generic"
-    api_key               : Provider API key.
-    model                 : Default model.
-    classifier_backend    : "heuristic" | "distilbert"
-    confidence_threshold  : Min complexity confidence.
-    domain_routing        : Enable domain-aware model selection.
-    domain_min_confidence : Min domain confidence to route.
-    preferred_provider    : Provider preference for domain routing.
-    registry              : Custom ModelRegistry.
-    atlas_enabled         : Enable Phase 2 atlas storage. Default: True.
-    cache_enabled         : Enable Phase 3 semantic cache. Default: True.
-    cache_threshold       : Min cosine similarity for a cache hit. Default: 0.92.
-    cache_min_quality     : Min quality score on cached records. Default: 0.70.
-    cache_min_atlas_size  : Min atlas size before cache is active. Default: 50.
-    embedder_backend      : "hash" | "openai" | "local"
-    embedder_kwargs       : Passed to get_embedder().
-    max_retries           : Retry attempts on transient errors.
-    max_records           : Max usage tracker records.
-    verbose               : Print routing decisions per call.
-    ollama_url            : Ollama server URL.
-    config                : Override with custom Config.
-    **client_kwargs       : Passed to provider SDK constructor.
-
-    Examples
-    --------
-    # Full Phase 3 — semantic cache active
-    >>> client = ThinkRouter(provider="openai", cache_enabled=True)
-    >>> r = client.chat("Write a binary search in Python.")
-    >>> r.was_cached   # True once atlas has similar queries
-
-    # Warmup the cache with known query types
-    >>> from thinkrouter.domain import Domain
-    >>> from thinkrouter.constants import Tier
-    >>> client.cache.warmup(
-    ...     queries=["Write a Python function.", "Implement a sort algorithm."],
-    ...     domains=[Domain.CODE, Domain.CODE],
-    ...     models=["deepseek-coder-v2", "deepseek-coder-v2"],
-    ... )
-
-    # Cache performance
-    >>> client.cache.print_stats()
+    provider               : "openai" | "anthropic" | "ollama" | "generic"
+    api_key                : Provider API key.
+    model                  : Default model.
+    classifier_backend     : "heuristic" | "distilbert"
+    confidence_threshold   : Min complexity confidence.
+    domain_routing         : Enable domain-aware model selection.
+    domain_min_confidence  : Min domain confidence to route.
+    preferred_provider     : Provider preference for domain routing.
+    registry               : Custom ModelRegistry.
+    atlas_enabled          : Enable Phase 2 atlas storage.
+    cache_enabled          : Enable Phase 3 semantic cache.
+    cache_threshold        : Min cosine similarity for cache hit.
+    cache_min_quality      : Min quality score on cached records.
+    cache_min_atlas_size   : Min atlas size before cache activates.
+    embedder_backend       : "hash" | "openai" | "local"
+    confidence_enabled     : Enable Phase 4 confidence model. Default: True.
+    confidence_backend     : "heuristic" | "atlas"
+    escalation_model       : Model to use when confidence is ESCALATE.
+    cost_tracking          : Enable real-time cost tracking. Default: True.
+    fallback_providers     : Ordered list of fallback provider names.
+    fallback_api_keys      : API keys for fallback providers.
+    max_retries            : Retry attempts on transient errors.
+    max_records            : Max usage tracker records.
+    verbose                : Print routing decision per call.
+    ollama_url             : Ollama server URL.
+    config                 : Override with custom Config.
     """
 
     _DEFAULT_MODELS: Dict[str, str] = {
@@ -186,6 +186,12 @@ class ThinkRouter:
         cache_min_atlas_size:  Optional[int]        = None,
         embedder_backend:      Optional[str]        = None,
         embedder_kwargs:       Optional[Dict]       = None,
+        confidence_enabled:    bool                 = True,
+        confidence_backend:    str                  = "heuristic",
+        escalation_model:      Optional[str]        = None,
+        cost_tracking:         bool                 = True,
+        fallback_providers:    Optional[List[str]]  = None,
+        fallback_api_keys:     Optional[Dict[str,str]] = None,
         max_retries:           int                  = 3,
         max_records:           int                  = 10_000,
         verbose:               bool                 = False,
@@ -203,33 +209,38 @@ class ThinkRouter:
         self.domain_min_confidence = domain_min_confidence
         self._preferred_provider   = preferred_provider or provider
         self._registry             = registry or DEFAULT_REGISTRY
+        self._escalation_model     = escalation_model
 
-        # Complexity classifier
+        # Classifiers
         clf_kw: Dict[str, Any] = {}
         if classifier_backend == "distilbert":
             clf_kw["threshold"]  = confidence_threshold
             clf_kw["model_name"] = cfg.hf_model
         self._clf: BaseClassifier = get_classifier(classifier_backend, **clf_kw)
-        self._threshold = confidence_threshold
-
-        # Domain classifier
-        self._domain_clf = DomainClassifier(min_confidence=domain_min_confidence)
+        self._threshold           = confidence_threshold
+        self._domain_clf          = DomainClassifier(min_confidence=domain_min_confidence)
 
         # Usage tracker
         self.usage = UsageTracker(max_records=max_records)
 
-        # ── Phase 2 + Phase 3: Embedder, Atlas, Cache ──────────────────
+        # Phase 4 — Confidence model
+        self.confidence_model: Optional[HeuristicConfidenceModel] = None
+        if confidence_enabled:
+            self.confidence_model = get_confidence_model(confidence_backend)
+
+        # Cost tracker
+        self.cost_tracker: Optional[CostTracker] = None
+        if cost_tracking:
+            self.cost_tracker = CostTracker()
+
+        # Phase 2 + 3 — Embedder, Atlas, Cache
         _atlas_enabled = atlas_enabled if atlas_enabled is not None else cfg.atlas_enabled
         _cache_enabled = cache_enabled if cache_enabled is not None else cfg.cache_enabled
         _emb_backend   = embedder_backend or cfg.embedder_backend
         _emb_kwargs    = embedder_kwargs or {}
 
-        _cache_threshold      = cache_threshold      or cfg.cache_threshold
-        _cache_min_quality    = cache_min_quality    or cfg.cache_min_quality
-        _cache_min_atlas_size = cache_min_atlas_size or cfg.cache_min_atlas_size
-
-        self._embedder = None
-        self.atlas     = None
+        self._embedder            = None
+        self.atlas                = None
         self.cache: Optional[SemanticCache] = None
 
         if _atlas_enabled:
@@ -244,19 +255,23 @@ class ThinkRouter:
                     max_records=cfg.atlas_max,
                 )
                 if _cache_enabled:
+                    _thresh  = cache_threshold      or cfg.cache_threshold
+                    _min_q   = cache_min_quality    or cfg.cache_min_quality
+                    _min_sz  = cache_min_atlas_size or cfg.cache_min_atlas_size
                     self.cache = SemanticCache(
-                        atlas=self.atlas,
-                        embedder=self._embedder,
-                        threshold=_cache_threshold,
-                        min_quality=_cache_min_quality,
-                        min_atlas_size=_cache_min_atlas_size,
+                        atlas=self.atlas, embedder=self._embedder,
+                        threshold=_thresh, min_quality=_min_q,
+                        min_atlas_size=_min_sz,
                     )
+                    # Upgrade confidence model to atlas-backed if atlas available
+                    if confidence_enabled and confidence_backend == "heuristic" and self.atlas:
+                        pass  # stay heuristic until atlas is large enough
             except Exception:
                 self._embedder = None
                 self.atlas     = None
                 self.cache     = None
 
-        # ── Provider adapter ───────────────────────────────────────────
+        # Primary adapter
         self._adapter: Optional[Any] = None
         self._ollama_adapter: Optional[Any] = None
 
@@ -296,7 +311,60 @@ class ThinkRouter:
             except Exception:
                 pass
 
-    # ── Classify only ──────────────────────────────────────────────────────
+        # Fallback chain
+        self._fallback: Optional[FallbackChain] = None
+        if fallback_providers and self._adapter is not None:
+            self._fallback = self._build_fallback(
+                primary_provider=provider,
+                primary_adapter=self._adapter,
+                primary_model=self.model,
+                fallback_providers=fallback_providers,
+                fallback_api_keys=fallback_api_keys or {},
+                ollama_url=ollama_url,
+                max_retries=max_retries,
+                cfg=cfg,
+            )
+
+    # ── Fallback chain builder ─────────────────────────────────────────────
+
+    def _build_fallback(
+        self,
+        primary_provider: str,
+        primary_adapter:  Any,
+        primary_model:    str,
+        fallback_providers: List[str],
+        fallback_api_keys:  Dict[str, str],
+        ollama_url:         str,
+        max_retries:        int,
+        cfg:                Config,
+    ) -> Optional[FallbackChain]:
+        adapters = [(primary_provider, primary_adapter)]
+        models   = [primary_model]
+
+        for prov in fallback_providers:
+            if prov == "ollama":
+                try:
+                    from .ollama_adapter import OllamaAdapter
+                    adapters.append(("ollama", OllamaAdapter(base_url=ollama_url)))
+                    models.append(self._DEFAULT_MODELS["ollama"])
+                except Exception:
+                    pass
+            elif prov == "openai":
+                key = fallback_api_keys.get("openai", cfg.openai_api_key)
+                if key:
+                    adapters.append(("openai", OpenAIAdapter(key, max_retries=max_retries)))
+                    models.append(self._DEFAULT_MODELS["openai"])
+            elif prov == "anthropic":
+                key = fallback_api_keys.get("anthropic", cfg.anthropic_api_key)
+                if key:
+                    adapters.append(("anthropic", AnthropicAdapter(key, max_retries=max_retries)))
+                    models.append(self._DEFAULT_MODELS["anthropic"])
+
+        if len(adapters) < 2:
+            return None
+        return FallbackChain(adapters=adapters, models=models)
+
+    # ── Classify-only API ──────────────────────────────────────────────────
 
     def classify(self, query: str) -> ClassifierResult:
         return self._clf.predict(query)
@@ -313,28 +381,25 @@ class ThinkRouter:
     def classify_full(self, query: str):
         return self._clf.predict(query), self._domain_clf.predict(query)
 
+    def assess_confidence(self, query: str, model: Optional[str] = None) -> Optional[ConfidenceResult]:
+        if not self.confidence_model:
+            return None
+        return self.confidence_model.predict(query, model or self.model)
+
     # ── Quality feedback ───────────────────────────────────────────────────
 
     def update_quality(self, record_id: str, quality_score: float) -> None:
-        """Update quality score for a past routing decision in the atlas."""
         if self.atlas and record_id:
             self.atlas.update_quality(record_id, quality_score)
 
-    # ── Core routing pipeline ──────────────────────────────────────────────
+    # ── Core pipeline ──────────────────────────────────────────────────────
 
-    def _route(
-        self,
-        query:    str,
-        model:    Optional[str],
-        messages: Optional[List[Dict[str, str]]],
-        system:   Optional[str],
-    ):
+    def _pipeline(self, query: str, override_model: Optional[str]):
         """
-        Full routing pipeline. Returns:
-          (clf_result, domain_result, model_target,
-           cache_result, target_model, target_provider, adapter, embedding)
+        Run the full pre-inference pipeline. Returns everything the
+        adapter call needs plus all routing metadata.
         """
-        # Step 1: embed query (needed for cache + atlas)
+        # 1. Embed
         embedding = None
         if self._embedder:
             try:
@@ -342,63 +407,75 @@ class ThinkRouter:
             except Exception:
                 pass
 
-        # Step 2: Phase 3 — semantic cache check
+        # 2. Semantic cache
         cache_result: Optional[CacheResult] = None
         if self.cache and embedding is not None:
             cache_result = self.cache.lookup(embedding)
 
-        # Step 3: classifiers (skip on cache hit)
+        # 3. Classifiers (skip on cache hit)
         if cache_result:
             clf_result    = None
             domain_result = None
-            cached_model  = cache_result.model
-            cached_prov   = cache_result.provider
+            tier          = cache_result.tier
+            domain        = cache_result.domain
         else:
             clf_result    = self._clf.predict(query)
             domain_result = None
-            cached_model  = model or self.model
-            cached_prov   = self.provider
+            tier          = clf_result.tier
+            domain        = Domain.GENERAL
 
             if self.domain_routing:
                 domain_result = self._domain_clf.predict(query)
                 if domain_result.confidence >= self.domain_min_confidence:
-                    _cached_domain = domain_result.domain  # noqa: F841
+                    domain = domain_result.domain
 
-        # Step 4: model registry
-        model_target:   Optional[ModelTarget] = None
-        target_model  = model or self.model
+        # 4. Confidence model
+        conf_result: Optional[ConfidenceResult] = None
+        if self.confidence_model and not cache_result:
+            target_for_conf = override_model or self.model
+            conf_result     = self.confidence_model.predict(query, target_for_conf)
+
+        # 5. Model registry
+        model_target:  Optional[ModelTarget] = None
+        target_model  = override_model or self.model
         target_prov   = self.provider
         adapter       = self._adapter
 
-        if cache_result:
-            # Use cached model/provider directly
-            target_model = cached_model
-            target_prov  = cached_prov
-            if cached_prov == "ollama" and self._ollama_adapter:
-                adapter = self._ollama_adapter
-        else:
+        if not cache_result:
             if self.domain_routing and domain_result and \
                     domain_result.confidence >= self.domain_min_confidence:
-                model_target = self._registry.resolve(
-                    domain_result.domain,
-                    preferred_provider=self._preferred_provider,
-                )
-                if model_target.provider == "ollama" and self.provider != "ollama":
-                    if self._ollama_adapter and self._ollama_adapter.is_available():
-                        adapter      = self._ollama_adapter
+                use_prov = self._preferred_provider
+                # Escalate to stronger model if confidence model says so
+                if conf_result and conf_result.recommendation.value in ("escalate",) \
+                        and self._escalation_model:
+                    target_model = self._escalation_model
+                else:
+                    model_target = self._registry.resolve(
+                        domain_result.domain,
+                        preferred_provider=use_prov,
+                    )
+                    if model_target.provider == "ollama" and self.provider != "ollama":
+                        if self._ollama_adapter and self._ollama_adapter.is_available():
+                            adapter      = self._ollama_adapter
+                            target_model = model_target.model
+                            target_prov  = "ollama"
+                        else:
+                            fb = self._registry.resolve(
+                                domain_result.domain,
+                                preferred_provider=self.provider,
+                            )
+                            target_model = fb.model
+                    elif model_target.provider == self.provider:
                         target_model = model_target.model
-                        target_prov  = "ollama"
-                    else:
-                        fb = self._registry.resolve(
-                            domain_result.domain,
-                            preferred_provider=self.provider,
-                        )
-                        target_model = fb.model
-                elif model_target.provider == self.provider:
-                    target_model = model_target.model
+        else:
+            target_model = cache_result.model
+            target_prov  = cache_result.provider
+            if target_prov == "ollama" and self._ollama_adapter:
+                adapter = self._ollama_adapter
 
-        return (clf_result, domain_result, model_target,
-                cache_result, target_model, target_prov, adapter, embedding)
+        return (clf_result, domain_result, model_target, cache_result,
+                conf_result, tier, domain, target_model, target_prov,
+                adapter, embedding)
 
     # ── Sync chat ──────────────────────────────────────────────────────────
 
@@ -416,58 +493,73 @@ class ThinkRouter:
                 "No provider adapter. Pass provider='openai', 'anthropic', or 'ollama'."
             )
 
-        (clf_result, domain_result, model_target,
-         cache_result, target_model, target_prov,
-         adapter, embedding) = self._route(query, model, messages, system)
+        (clf_result, domain_result, model_target, cache_result,
+         conf_result, tier, domain, target_model, target_prov,
+         adapter, embedding) = self._pipeline(query, model)
 
-        tier = cache_result.tier if cache_result else (clf_result.tier if clf_result else Tier.FULL)
-        self._log(clf_result, domain_result, cache_result, target_model, target_prov)
+        self._log(clf_result, domain_result, cache_result, conf_result, target_model, target_prov)
 
         msg_list = self._msgs(query, messages, system)
         kw       = dict(extra)
         if self.provider == "anthropic" and system:
             kw["system"] = system
 
-        if target_prov == "ollama":
+        fallback_result: Optional[FallbackResult] = None
+
+        # Use fallback chain if configured, else direct call
+        if self._fallback and not cache_result:
+            content, raw, usage_tokens, xparam, fallback_result = self._fallback.call(
+                messages=msg_list, tier=tier, temperature=temperature, **kw,
+            )
+            actual_prov  = fallback_result.succeeded
+            actual_model = self._fallback._models[
+                [p for p,_ in self._fallback._adapters].index(actual_prov)
+            ]
+        elif target_prov == "ollama":
             content, raw, usage_tokens = adapter.call(
                 messages=msg_list, model=target_model,
                 max_tokens=TIER_TOKEN_BUDGETS[tier],
                 temperature=temperature, **kw,
             )
             xparam = None
+            actual_prov = "ollama"
+            actual_model = target_model
         else:
             content, raw, usage_tokens, xparam = adapter.call(
                 messages=msg_list, model=target_model,
                 tier=tier, temperature=temperature, **kw,
             )
+            actual_prov = target_prov
+            actual_model = target_model
 
-        # Record in usage tracker
         if clf_result:
             self.usage.record(
                 query=query, tier=clf_result.tier,
                 confidence=clf_result.confidence,
                 latency_ms=clf_result.latency_ms,
-                model=target_model, provider=target_prov,
+                model=actual_model, provider=actual_prov,
             )
 
-        # Phase 2: store in atlas (background)
-        record_id = self._store_async(
-            query=query, embedding=embedding,
-            domain=cache_result.domain if cache_result else
-                   (domain_result.domain if domain_result else Domain.GENERAL),
-            tier=tier, model=target_model, provider=target_prov,
-        )
+        cost_rec = None
+        if self.cost_tracker:
+            cost_rec = self.cost_tracker.record(
+                model=actual_model, provider=actual_prov,
+                domain=domain, tier=tier,
+                input_tokens=usage_tokens.get("prompt_tokens", 0),
+                output_tokens=usage_tokens.get("completion_tokens", 0),
+            )
+
+        record_id = self._store_async(query, embedding, domain, tier, actual_model, actual_prov)
 
         return RouterResponse(
-            content=content,
-            routing=clf_result,
-            domain_result=domain_result,
-            model_target=model_target,
-            cache_result=cache_result,
-            raw=raw, provider=target_prov, model=target_model,
+            content=content, routing=clf_result,
+            domain_result=domain_result, model_target=model_target,
+            cache_result=cache_result, confidence_result=conf_result,
+            cost_record=cost_rec, fallback_result=fallback_result,
+            raw=raw, provider=actual_prov, model=actual_model,
             usage_tokens=usage_tokens, record_id=record_id,
-            reasoning_effort=xparam if target_prov == "openai" else None,
-            thinking_budget=xparam if target_prov == "anthropic" else None,
+            reasoning_effort=xparam if actual_prov == "openai" else None,
+            thinking_budget=xparam if actual_prov == "anthropic" else None,
         )
 
     # ── Async chat ─────────────────────────────────────────────────────────
@@ -484,73 +576,82 @@ class ThinkRouter:
         if self._adapter is None:
             raise ConfigurationError("No provider adapter configured.")
 
-        (clf_result, domain_result, model_target,
-         cache_result, target_model, target_prov,
-         adapter, embedding) = self._route(query, model, messages, system)
+        (clf_result, domain_result, model_target, cache_result,
+         conf_result, tier, domain, target_model, target_prov,
+         adapter, embedding) = self._pipeline(query, model)
 
-        tier = cache_result.tier if cache_result else (clf_result.tier if clf_result else Tier.FULL)
-        self._log(clf_result, domain_result, cache_result, target_model, target_prov)
+        self._log(clf_result, domain_result, cache_result, conf_result, target_model, target_prov)
 
         msg_list = self._msgs(query, messages, system)
         kw       = dict(extra)
         if self.provider == "anthropic" and system:
             kw["system"] = system
 
-        if target_prov == "ollama":
+        fallback_result = None
+
+        if self._fallback and not cache_result:
+            content, raw, usage_tokens, xparam, fallback_result = await self._fallback.acall(
+                messages=msg_list, tier=tier, temperature=temperature, **kw,
+            )
+            actual_prov  = fallback_result.succeeded
+            actual_model = self._fallback._models[
+                [p for p,_ in self._fallback._adapters].index(actual_prov)
+            ]
+        elif target_prov == "ollama":
             content, raw, usage_tokens = await adapter.acall(
                 messages=msg_list, model=target_model,
                 max_tokens=TIER_TOKEN_BUDGETS[tier],
                 temperature=temperature, **kw,
             )
             xparam = None
+            actual_prov = "ollama"
+            actual_model = target_model
         else:
             content, raw, usage_tokens, xparam = await adapter.acall(
                 messages=msg_list, model=target_model,
                 tier=tier, temperature=temperature, **kw,
             )
+            actual_prov = target_prov
+            actual_model = target_model
 
         if clf_result:
             self.usage.record(
                 query=query, tier=clf_result.tier,
                 confidence=clf_result.confidence,
                 latency_ms=clf_result.latency_ms,
-                model=target_model, provider=target_prov,
+                model=actual_model, provider=actual_prov,
             )
 
-        record_id = self._store_async(
-            query=query, embedding=embedding,
-            domain=cache_result.domain if cache_result else
-                   (domain_result.domain if domain_result else Domain.GENERAL),
-            tier=tier, model=target_model, provider=target_prov,
-        )
+        cost_rec = None
+        if self.cost_tracker:
+            cost_rec = self.cost_tracker.record(
+                model=actual_model, provider=actual_prov,
+                domain=domain, tier=tier,
+                input_tokens=usage_tokens.get("prompt_tokens", 0),
+                output_tokens=usage_tokens.get("completion_tokens", 0),
+            )
+
+        record_id = self._store_async(query, embedding, domain, tier, actual_model, actual_prov)
 
         return RouterResponse(
-            content=content,
-            routing=clf_result,
-            domain_result=domain_result,
-            model_target=model_target,
-            cache_result=cache_result,
-            raw=raw, provider=target_prov, model=target_model,
+            content=content, routing=clf_result,
+            domain_result=domain_result, model_target=model_target,
+            cache_result=cache_result, confidence_result=conf_result,
+            cost_record=cost_rec, fallback_result=fallback_result,
+            raw=raw, provider=actual_prov, model=actual_model,
             usage_tokens=usage_tokens, record_id=record_id,
-            reasoning_effort=xparam if target_prov == "openai" else None,
-            thinking_budget=xparam if target_prov == "anthropic" else None,
+            reasoning_effort=xparam if actual_prov == "openai" else None,
+            thinking_budget=xparam if actual_prov == "anthropic" else None,
         )
 
-    # ── Streaming ──────────────────────────────────────────────────────────
+    # ── Stream ─────────────────────────────────────────────────────────────
 
-    def stream(
-        self,
-        query:       str,
-        model:       Optional[str] = None,
-        system:      Optional[str] = None,
-        temperature: float         = 0.7,
-        **extra:     Any,
-    ) -> Iterator[str]:
+    def stream(self, query, model=None, system=None, temperature=0.7, **extra):
         if self._adapter is None:
             raise ConfigurationError("No provider adapter configured.")
-        clf = self._clf.predict(query)
+        clf    = self._clf.predict(query)
         target = model or self.model
-        self._log(clf, None, None, target, self.provider)
+        self._log(clf, None, None, None, target, self.provider)
         yield from self._adapter.stream(
             messages=self._msgs(query, None, system),
             model=target, tier=clf.tier, temperature=temperature, **extra,
@@ -560,19 +661,12 @@ class ThinkRouter:
             latency_ms=clf.latency_ms, model=target, provider=self.provider,
         )
 
-    async def astream(
-        self,
-        query:       str,
-        model:       Optional[str] = None,
-        system:      Optional[str] = None,
-        temperature: float         = 0.7,
-        **extra:     Any,
-    ) -> AsyncIterator[str]:
+    async def astream(self, query, model=None, system=None, temperature=0.7, **extra):
         if self._adapter is None:
             raise ConfigurationError("No provider adapter configured.")
-        clf = self._clf.predict(query)
+        clf    = self._clf.predict(query)
         target = model or self.model
-        self._log(clf, None, None, target, self.provider)
+        self._log(clf, None, None, None, target, self.provider)
         async for chunk in self._adapter.astream(
             messages=self._msgs(query, None, system),
             model=target, tier=clf.tier, temperature=temperature, **extra,
@@ -583,14 +677,14 @@ class ThinkRouter:
             latency_ms=clf.latency_ms, model=target, provider=self.provider,
         )
 
-    # ── Background atlas store ──────────────────────────────────────────────
+    # ── Background atlas store ─────────────────────────────────────────────
 
-    def _store_async(self, query, embedding, domain, tier, model, provider) -> Optional[str]:
+    def _store_async(self, query, embedding, domain, tier, model, provider):
         if not self._embedder or not self.atlas or embedding is None:
             return None
         import uuid
         record_id = str(uuid.uuid4())
-        atl, emb = self.atlas, embedding
+        atl, emb  = self.atlas, embedding
 
         def _store():
             try:
@@ -603,8 +697,7 @@ class ThinkRouter:
             except Exception:
                 pass
 
-        t = threading.Thread(target=_store, daemon=True)
-        t.start()
+        threading.Thread(target=_store, daemon=True).start()
         return record_id
 
     # ── Helpers ────────────────────────────────────────────────────────────
@@ -616,35 +709,28 @@ class ThinkRouter:
             return [{"role":"system","content":system},{"role":"user","content":query}]
         return [{"role":"user","content":query}]
 
-    def _log(self, clf, dom, cache, model, provider):
+    def _log(self, clf, dom, cache, conf, model, provider):
         if not self.verbose:
             return
         if cache:
-            print(
-                f"[ThinkRouter/CACHE] sim={cache.similarity:.4f}  "
-                f"domain={cache.domain.value}  tier={cache.tier.name}  "
-                f"model={model}  lat={cache.latency_ms:.2f}ms"
-            )
+            print(f"[ThinkRouter/CACHE] sim={cache.similarity:.4f} domain={cache.domain.value} "
+                  f"tier={cache.tier.name} model={model}")
         else:
-            dom_str = f"  domain={dom.domain.value}" if dom else ""
-            print(
-                f"[ThinkRouter] tier={clf.tier.name:<10} "
-                f"conf={clf.confidence:.3f}  clf={clf.latency_ms:.2f}ms"
-                f"{dom_str}  model={model}  provider={provider}"
-            )
+            dom_s  = f" domain={dom.domain.value}" if dom else ""
+            risk_s = f" risk={conf.risk_score:.2f}({conf.recommendation.value})" if conf else ""
+            print(f"[ThinkRouter] tier={clf.tier.name:<10} conf={clf.confidence:.3f}"
+                  f"{dom_s}{risk_s} model={model} provider={provider}")
 
     def __repr__(self) -> str:
-        s = self.usage.summary()
-        cache_str = (
-            f", hit_rate={self.cache.stats().hit_rate:.1f}%"
-            if self.cache else ""
-        )
-        atlas_str = f", atlas={len(self.atlas)}" if self.atlas else ""
+        s      = self.usage.summary()
+        cache_ = f", hit_rate={self.cache.stats().hit_rate:.1f}%" if self.cache else ""
+        atlas_ = f", atlas={len(self.atlas)}" if self.atlas else ""
+        cost_  = ""
+        if self.cost_tracker:
+            cs = self.cost_tracker.summary()
+            cost_ = f", saved=${cs.saved_usd:.4f}"
         return (
-            f"ThinkRouter("
-            f"provider={self.provider!r}, "
-            f"model={self.model!r}, "
-            f"calls={s.total_calls}, "
-            f"savings={s.savings_pct:.1f}%"
-            f"{atlas_str}{cache_str})"
+            f"ThinkRouter(provider={self.provider!r}, model={self.model!r}, "
+            f"calls={s.total_calls}, savings={s.savings_pct:.1f}%"
+            f"{atlas_}{cache_}{cost_})"
         )

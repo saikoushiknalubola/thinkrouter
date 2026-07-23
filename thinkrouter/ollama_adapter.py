@@ -45,6 +45,8 @@ class OllamaAdapter:
         Request timeout in seconds. Default: 120 (local models can be slow)
     """
 
+    _is_ollama: bool = True  # type marker for FallbackChain detection
+
     def __init__(
         self,
         base_url: str   = "http://localhost:11434",

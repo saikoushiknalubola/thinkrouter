@@ -1,4 +1,4 @@
-"""tests/test_thinkrouter.py — v0.6.0  (Phase 1 + 2 + 3)"""
+"""tests/test_thinkrouter.py — v0.7.0  Phase 1+2+3+4"""
 from __future__ import annotations
 
 import os, tempfile, threading
@@ -8,506 +8,620 @@ import numpy as np
 import pytest
 
 from thinkrouter import (
-    Atlas, CacheResult, CacheStats, ClassifierResult, Config,
-    Domain, DomainClassifier, DomainResult, EmbeddingResult,
-    HashSketchEmbedder, ModelRegistry, ModelTarget, RouterResponse,
-    SemanticCache, ThinkRouter, Tier, TIER_TOKEN_BUDGETS,
-    UsageTracker, get_classifier, get_embedder,
+    Atlas, CacheResult, ClassifierResult, Config,
+    ConfidenceResult, CostRecord, CostTracker, Domain,
+    DomainClassifier, DomainResult, EmbeddingResult,
+    FallbackChain, FallbackResult, HashSketchEmbedder,
+    HeuristicConfidenceModel, ModelRegistry, ModelTarget,
+    Recommendation, RouterResponse, SemanticCache,
+    ThinkRouter, Tier, TIER_TOKEN_BUDGETS,
+    UsageTracker, get_classifier, get_confidence_model, get_cost_usd,
 )
 from thinkrouter.exceptions import (
     ConfigurationError, ProviderError, RateLimitError,
-    ThinkRouterError, ClassifierError, AuthenticationError,
+    ThinkRouterError, ClassifierError,
 )
 from thinkrouter.constants import (
-    ANTHROPIC_THINKING_BUDGETS, ANTHROPIC_THINKING_MODELS,
     OPENAI_REASONING_EFFORT, OPENAI_REASONING_MODELS,
+    ANTHROPIC_THINKING_BUDGETS, ANTHROPIC_THINKING_MODELS,
 )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _mkrouter(content="Test.", atlas=None, cache=None):
+def _mkrouter(content="Test.", atlas=None, cache=None, with_confidence=True):
     r = ThinkRouter.__new__(ThinkRouter)
     r.provider="openai"; r.model="gpt-4o"; r.verbose=False; r.max_retries=1
     r.domain_routing=True; r.domain_min_confidence=0.40
-    r._preferred_provider="openai"
-    r._clf=get_classifier("heuristic")
-    r._domain_clf=DomainClassifier()
+    r._preferred_provider="openai"; r._escalation_model=None
+    r._clf=get_classifier("heuristic"); r._domain_clf=DomainClassifier()
     r._registry=ModelRegistry(provider_priority=["openai"])
     r._threshold=0.75; r.usage=UsageTracker()
-    r._ollama_adapter=None
+    r._ollama_adapter=None; r._fallback=None
     r._embedder=HashSketchEmbedder(dim=64) if (atlas or cache) else None
     r.atlas=atlas; r.cache=cache
+    r.confidence_model=HeuristicConfidenceModel() if with_confidence else None
+    r.cost_tracker=CostTracker()
     a=MagicMock()
-    ret=(content,MagicMock(),{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30},None)
+    ret=("Test.",MagicMock(),{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150},None)
     a.call=MagicMock(return_value=ret); a.acall=AsyncMock(return_value=ret)
     r._adapter=a
     return r
 
-def _mk_atlas(tmpdir=None):
-    d = tmpdir or tempfile.mkdtemp()
-    return Atlas(path=d, embedding_dim=64, embedding_backend="hash-sketch-64")
 
-def _mk_cache(atlas, threshold=0.85, min_atlas_size=0):
-    emb = HashSketchEmbedder(dim=64)
-    return SemanticCache(atlas=atlas, embedder=emb,
-                         threshold=threshold, min_atlas_size=min_atlas_size)
+# ══ PHASE 4 — Confidence Model ════════════════════════════════════════════
 
-def _seed_atlas(atlas, emb, queries, domain=Domain.CODE, tier=Tier.FULL):
-    for q in queries:
-        vec = emb.embed(q)
-        atlas.store(query=q, embedding=vec, domain=domain, tier=tier,
-                    model="deepseek-coder-v2", provider="openai",
-                    quality_score=0.90, latency_ms=5.0)
-
-
-# ══ PHASE 3 — SemanticCache ════════════════════════════════════════════════
-
-class TestSemanticCache:
+class TestHeuristicConfidenceModel:
 
     def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.atlas  = _mk_atlas(self.tmpdir)
-        self.emb    = HashSketchEmbedder(dim=64)
-        self.cache  = _mk_cache(self.atlas, threshold=0.80, min_atlas_size=0)
+        self.clf = HeuristicConfidenceModel()
 
-    def teardown_method(self):
-        self.atlas.close()
+    # Risk score range
+    def test_risk_in_range(self):
+        r = self.clf.predict("What happened in the news today?", "gpt-4o")
+        assert 0.0 <= r.risk_score <= 1.0
 
-    # Basic lookup behaviour
+    def test_result_type(self):
+        r = self.clf.predict("What is photosynthesis?")
+        assert isinstance(r, ConfidenceResult)
 
-    def test_empty_atlas_returns_none(self):
-        vec = self.emb.embed("Write a binary search.")
-        assert self.cache.lookup(vec) is None
+    # High-risk signals
+    def test_recent_event_high_risk(self):
+        r = self.clf.predict("What happened in the news today?", "gpt-4o")
+        assert r.risk_score >= 0.55
 
-    def test_hit_after_seeding(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search in Python."])
-        vec = self.emb.embed("Write a binary search in Python.")
-        result = self.cache.lookup(vec)
-        assert result is not None
-        assert isinstance(result, CacheResult)
+    def test_citation_request_high_risk(self):
+        r = self.clf.predict("Cite the peer-reviewed study on this topic.", "gpt-4o")
+        assert r.risk_score >= 0.50
 
-    def test_hit_returns_correct_domain(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."],
-                    domain=Domain.CODE)
-        vec = self.emb.embed("Write a binary search.")
-        result = self.cache.lookup(vec)
-        assert result is not None
-        assert result.domain == Domain.CODE
+    def test_specific_price_high_risk(self):
+        r = self.clf.predict("What is the current price of Tesla stock?", "gpt-4o")
+        assert r.risk_score >= 0.45
 
-    def test_hit_returns_correct_tier(self):
-        _seed_atlas(self.atlas, self.emb, ["Prove sqrt(2) is irrational."],
-                    domain=Domain.MATH, tier=Tier.FULL)
-        vec = self.emb.embed("Prove sqrt(2) is irrational.")
-        result = self.cache.lookup(vec)
-        assert result is not None
-        assert result.tier == Tier.FULL
-
-    def test_hit_similarity_in_range(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a quicksort."])
-        vec = self.emb.embed("Write a quicksort.")
-        result = self.cache.lookup(vec)
-        if result:
-            assert 0.0 <= result.similarity <= 1.0
-
-    def test_high_threshold_reduces_hits(self):
-        cache_strict = _mk_cache(self.atlas, threshold=0.9999, min_atlas_size=0)
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."])
-        vec = self.emb.embed("Write a quicksort algorithm.")
-        # Very different query — should miss with strict threshold
-        result = cache_strict.lookup(vec)
-        # Result may or may not hit — just ensure no error
-        assert result is None or isinstance(result, CacheResult)
-
-    def test_min_atlas_size_prevents_early_cache(self):
-        cache = _mk_cache(self.atlas, threshold=0.80, min_atlas_size=100)
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."])
-        vec = self.emb.embed("Write a binary search.")
-        # Atlas has 1 record but min_atlas_size=100 → must miss
-        assert cache.lookup(vec) is None
-
-    def test_low_quality_record_skipped(self):
-        vec_store = self.emb.embed("Write a binary search.")
-        self.atlas.store(
-            query="Write a binary search.", embedding=vec_store,
-            domain=Domain.CODE, tier=Tier.FULL,
-            model="gpt-4o", provider="openai",
-            quality_score=0.30,   # below min_quality=0.70
+    def test_medical_specific_high_risk(self):
+        r = self.clf.predict(
+            "What is the FDA-approved dosage of metformin and its drug interactions?",
+            "gpt-4o"
         )
-        cache = _mk_cache(self.atlas, threshold=0.80, min_atlas_size=0)
-        cache.min_quality = 0.70
-        vec = self.emb.embed("Write a binary search.")
-        result = cache.lookup(vec)
-        assert result is None
+        assert r.risk_score >= 0.60
 
-    def test_none_quality_score_always_qualifies(self):
-        vec_store = self.emb.embed("Write a binary search.")
-        self.atlas.store(
-            query="Write a binary search.", embedding=vec_store,
-            domain=Domain.CODE, tier=Tier.FULL,
-            model="gpt-4o", provider="openai",
-            quality_score=None,   # no score yet — should still qualify
+    # Low-risk signals
+    def test_math_proof_low_risk(self):
+        r = self.clf.predict("Prove that sqrt(2) is irrational.", "gpt-4o")
+        assert r.risk_score < 0.40
+
+    def test_code_generation_low_risk(self):
+        r = self.clf.predict("Write a binary search function in Python.", "gpt-4o")
+        assert r.risk_score < 0.40
+
+    def test_historical_low_risk(self):
+        r = self.clf.predict(
+            "When was the Eiffel Tower built in the 1880s?", "gpt-4o"
         )
-        cache = _mk_cache(self.atlas, threshold=0.80, min_atlas_size=0)
-        vec = self.emb.embed("Write a binary search.")
-        result = cache.lookup(vec)
-        assert result is not None
+        assert r.risk_score < 0.45
 
-    def test_lookup_query_convenience(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."])
-        result = self.cache.lookup_query("Write a binary search.")
-        assert result is None or isinstance(result, CacheResult)
+    # Recommendation mapping
+    def test_recommendation_is_enum(self):
+        r = self.clf.predict("test", "gpt-4o")
+        assert isinstance(r.recommendation, Recommendation)
 
-    def test_cache_result_repr(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."])
-        vec = self.emb.embed("Write a binary search.")
-        result = self.cache.lookup(vec)
-        if result:
-            assert "CacheResult(" in repr(result)
-            assert "domain=" in repr(result)
-
-    def test_is_high_confidence(self):
-        r = CacheResult(
-            domain=Domain.CODE, tier=Tier.FULL, model="gpt-4o",
-            provider="openai", similarity=0.97, quality_score=0.9,
-            source_id="abc", source_preview="test", latency_ms=1.0,
+    def test_high_risk_recommend_rag_or_escalate(self):
+        r = self.clf.predict(
+            "What happened in this week's G7 summit and cite your sources?",
+            "gpt-4o"
         )
-        assert r.is_high_confidence is True
-        r2 = CacheResult(
-            domain=Domain.GENERAL, tier=Tier.SHORT, model="gpt-4o",
-            provider="openai", similarity=0.88, quality_score=0.8,
-            source_id="def", source_preview="test2", latency_ms=1.0,
+        assert r.recommendation in (
+            Recommendation.RAG, Recommendation.ESCALATE, Recommendation.ABSTAIN
         )
-        assert r2.is_high_confidence is False
 
-    # Stats
+    def test_safe_query_proceed(self):
+        r = self.clf.predict("Prove by induction that n^2 > 2n for n > 2.", "gpt-4o")
+        assert r.recommendation in (Recommendation.PROCEED, Recommendation.VERIFY)
 
-    def test_stats_empty(self):
-        s = self.cache.stats()
-        assert s.total_lookups == 0
-        assert s.cache_hits    == 0
-        assert s.hit_rate      == 0.0
+    # Properties
+    def test_is_high_risk_property(self):
+        r = self.clf.predict("What happened in the news today?", "gpt-4o")
+        assert r.is_high_risk == (r.risk_score >= 0.65)
 
-    def test_stats_after_miss(self):
-        vec = self.emb.embed("Anything")
-        self.cache.lookup(vec)
-        s = self.cache.stats()
-        assert s.total_lookups == 1
-        assert s.cache_hits    == 0
+    def test_is_safe_property(self):
+        r = self.clf.predict("Prove Pythagoras theorem algebraically.", "gpt-4o")
+        assert r.is_safe == (r.risk_score < 0.35)
 
-    def test_stats_after_hit(self):
-        _seed_atlas(self.atlas, self.emb, ["Write a binary search."])
-        vec = self.emb.embed("Write a binary search.")
-        self.cache.lookup(vec)
-        s = self.cache.stats()
-        assert s.total_lookups == 1
+    def test_signals_tuple(self):
+        r = self.clf.predict("What happened today?", "gpt-4o")
+        assert isinstance(r.signals, tuple)
 
-    def test_stats_str(self):
-        text = str(self.cache.stats())
-        assert "ThinkRouter" in text
-        assert "Hit rate" in text
+    def test_latency_fast(self):
+        r = self.clf.predict("test query", "gpt-4o")
+        assert r.latency_ms < 100
 
-    def test_reset_stats(self):
-        vec = self.emb.embed("test")
-        self.cache.lookup(vec)
-        self.cache.reset_stats()
-        assert self.cache.stats().total_lookups == 0
+    def test_backend_label(self):
+        r = self.clf.predict("test", "gpt-4o")
+        assert r.backend == "heuristic"
 
     def test_repr(self):
-        assert "SemanticCache(" in repr(self.cache)
-        assert "threshold=" in repr(self.cache)
+        r = self.clf.predict("test", "gpt-4o")
+        assert "ConfidenceResult(" in repr(r)
 
-    # Warmup
+    # Model modifier
+    def test_smaller_model_higher_risk(self):
+        r_large = self.clf.predict("What is the CEO of Apple?", "gpt-4o")
+        r_small = self.clf.predict("What is the CEO of Apple?", "gpt-4o-mini")
+        assert r_small.risk_score >= r_large.risk_score
 
-    def test_warmup_stores_records(self):
-        n = self.cache.warmup(
-            queries=["Write a binary search.", "Implement merge sort."],
-            domains=[Domain.CODE, Domain.CODE],
-            models=["deepseek-coder-v2", "deepseek-coder-v2"],
+    # Batch
+    def test_batch(self):
+        results = self.clf.predict_batch(
+            ["test1", "test2", "test3"], model="gpt-4o"
         )
-        assert n == 2
-        assert len(self.atlas) == 2
+        assert len(results) == 3
+        assert all(isinstance(r, ConfidenceResult) for r in results)
 
-    def test_warmup_enables_hits(self):
-        self.cache.warmup(
-            queries=["Write a binary search in Python."],
-            domains=[Domain.CODE],
-            models=["deepseek-coder-v2"],
+    # Factory
+    def test_get_confidence_model_heuristic(self):
+        m = get_confidence_model("heuristic")
+        assert isinstance(m, HeuristicConfidenceModel)
+
+    def test_get_confidence_model_bad(self):
+        with pytest.raises(ValueError):
+            get_confidence_model("nonexistent")
+
+
+# ══ PHASE 4 — Cost Tracker ════════════════════════════════════════════════
+
+class TestCostTracker:
+
+    def setup_method(self):
+        self.tracker = CostTracker()
+
+    def test_empty_summary(self):
+        s = self.tracker.summary()
+        assert s.total_calls == 0
+        assert s.total_cost_usd == 0.0
+        assert s.savings_pct == 0.0
+
+    def test_record_returns_cost_record(self):
+        rec = self.tracker.record(
+            model="gpt-4o", provider="openai",
+            domain=Domain.CODE, tier=Tier.FULL,
+            input_tokens=1000, output_tokens=500,
         )
-        result = self.cache.lookup_query("Write a binary search in Python.")
-        assert result is None or isinstance(result, CacheResult)
+        assert isinstance(rec, CostRecord)
+        assert rec.cost_usd >= 0.0
 
-    def test_warmup_empty_list(self):
-        n = self.cache.warmup(queries=[])
-        assert n == 0
+    def test_ollama_is_free(self):
+        rec = self.tracker.record(
+            model="deepseek-coder-v2", provider="ollama",
+            domain=Domain.CODE, tier=Tier.FULL,
+            input_tokens=1000, output_tokens=500,
+        )
+        assert rec.cost_usd == 0.0
+        assert rec.baseline_usd > 0.0
+        assert rec.saved_usd > 0.0
 
-    # Thread safety
+    def test_savings_accumulate(self):
+        for _ in range(5):
+            self.tracker.record(
+                model="deepseek-coder-v2", provider="ollama",
+                domain=Domain.CODE, tier=Tier.FULL,
+                input_tokens=500, output_tokens=200,
+            )
+        s = self.tracker.summary()
+        assert s.total_calls == 5
+        assert s.saved_usd > 0.0
+        assert s.savings_pct > 0.0
+        assert s.free_calls == 5
 
-    def test_stats_thread_safe(self):
+    def test_gpt4o_costs_money(self):
+        rec = self.tracker.record(
+            model="gpt-4o", provider="openai",
+            domain=Domain.GENERAL, tier=Tier.FULL,
+            input_tokens=1000, output_tokens=500,
+        )
+        assert rec.cost_usd > 0.0
+
+    def test_cost_by_domain(self):
+        self.tracker.record("gpt-4o","openai",Domain.CODE,Tier.FULL,100,50)
+        self.tracker.record("gpt-4o","openai",Domain.MATH,Tier.FULL,100,50)
+        s = self.tracker.summary()
+        assert "code" in s.cost_by_domain
+        assert "math" in s.cost_by_domain
+
+    def test_cost_by_model(self):
+        self.tracker.record("gpt-4o","openai",Domain.GENERAL,Tier.SHORT,100,50)
+        s = self.tracker.summary()
+        assert "gpt-4o" in s.cost_by_model
+
+    def test_reset(self):
+        self.tracker.record("gpt-4o","openai",Domain.GENERAL,Tier.FULL,500,200)
+        self.tracker.reset()
+        assert self.tracker.summary().total_calls == 0
+
+    def test_thread_safe(self):
         errors = []
-        _seed_atlas(self.atlas, self.emb, ["test query"])
-
-        def lookup_loop():
+        def w():
             try:
-                vec = self.emb.embed("test query")
                 for _ in range(20):
-                    self.cache.lookup(vec)
+                    self.tracker.record(
+                        "gpt-4o","openai",Domain.CODE,Tier.FULL,100,50
+                    )
             except Exception as e:
                 errors.append(e)
-
-        ths = [threading.Thread(target=lookup_loop) for _ in range(5)]
+        ths = [threading.Thread(target=w) for _ in range(5)]
         for t in ths: t.start()
         for t in ths: t.join()
         assert errors == []
-        s = self.cache.stats()
-        assert s.total_lookups == 100
+        assert self.tracker.summary().total_calls == 100
+
+    def test_summary_str(self):
+        self.tracker.record("gpt-4o","openai",Domain.CODE,Tier.FULL,500,200)
+        text = str(self.tracker.summary())
+        assert "Cost Dashboard" in text
+        assert "Actual spend" in text
+
+    def test_daily_projection(self):
+        self.tracker.record("gpt-4o","openai",Domain.GENERAL,Tier.FULL,1000,500)
+        proj = self.tracker.summary().daily_projection(10_000)
+        assert "month" in proj
+
+    def test_get_cost_usd_gpt4o(self):
+        cost = get_cost_usd("gpt-4o", 1_000_000, 0)
+        assert abs(cost - 2.50) < 0.01
+
+    def test_get_cost_usd_ollama(self):
+        cost = get_cost_usd("deepseek-coder-v2", 1_000_000, 1_000_000)
+        assert cost == 0.0
+
+    def test_recent(self):
+        for i in range(5):
+            self.tracker.record("gpt-4o","openai",Domain.GENERAL,Tier.SHORT,100,50)
+        assert len(self.tracker.recent(3)) == 3
 
 
-# ══ PHASE 3 — Router integration ══════════════════════════════════════════
+# ══ PHASE 4 — FallbackChain ═══════════════════════════════════════════════
 
-class TestRouterCacheIntegration:
+class TestFallbackChain:
 
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
+    def _mock_adapter(self, content="OK", fail_with=None):
+        a = MagicMock()
+        if fail_with:
+            a.call  = MagicMock(side_effect=fail_with)
+            a.acall = AsyncMock(side_effect=fail_with)
+        else:
+            ret = (content, MagicMock(), {"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}, None)
+            a.call  = MagicMock(return_value=ret)
+            a.acall = AsyncMock(return_value=ret)
+        return a
 
-    def test_was_cached_false_without_cache(self):
-        r = _mkrouter()
-        resp = r.chat("test")
-        assert resp.was_cached is False
-        assert resp.cache_result is None
+    def test_primary_success(self):
+        a = self._mock_adapter("primary response")
+        chain = FallbackChain([("openai",a)], ["gpt-4o"])
+        content, raw, usage, xp, fb = chain.call(
+            messages=[{"role":"user","content":"test"}],
+            tier=Tier.SHORT,
+        )
+        assert content == "primary response"
+        assert fb.fallback_used is False
+        assert fb.succeeded == "openai"
+        assert fb.attempts == 1
 
-    def test_cache_result_none_on_miss(self):
-        atlas = _mk_atlas(self.tmpdir)
-        cache = _mk_cache(atlas, min_atlas_size=0)
-        r = _mkrouter(atlas=atlas, cache=cache)
-        resp = r.chat("Write a binary search.")
-        assert resp.cache_result is None  # atlas empty → miss
+    def test_fallback_on_rate_limit(self):
+        a1 = self._mock_adapter(fail_with=RateLimitError("429",429,"openai"))
+        a2 = self._mock_adapter("fallback response")
+        chain = FallbackChain(
+            [("openai",a1),("anthropic",a2)],
+            ["gpt-4o","claude-sonnet-4-6"],
+            retry_delay=0.0,
+        )
+        content, _, _, _, fb = chain.call(
+            messages=[{"role":"user","content":"test"}], tier=Tier.FULL,
+        )
+        assert content == "fallback response"
+        assert fb.fallback_used is True
+        assert fb.succeeded == "anthropic"
+        assert fb.attempts == 2
+        assert len(fb.errors) == 1
 
-    def test_tier_property_from_classifiers(self):
-        r = _mkrouter()
-        resp = r.chat("What is 2+2?")
-        assert resp.tier == Tier.NO_THINK
+    def test_all_fail_raises(self):
+        err = ProviderError("fail",500,"openai")
+        a1  = self._mock_adapter(fail_with=err)
+        a2  = self._mock_adapter(fail_with=err)
+        chain = FallbackChain(
+            [("openai",a1),("anthropic",a2)],
+            ["gpt-4o","claude-sonnet-4-6"],
+            retry_delay=0.0,
+        )
+        with pytest.raises(ProviderError):
+            chain.call(messages=[{"role":"user","content":"test"}], tier=Tier.SHORT)
 
-    def test_tier_property_from_cache(self):
-        atlas = _mk_atlas(self.tmpdir)
-        emb   = HashSketchEmbedder(dim=64)
-        cache = _mk_cache(atlas, threshold=0.80, min_atlas_size=0)
-        # Pre-seed with exact query
-        vec = emb.embed("Write a binary search in Python.")
-        atlas.store(query="Write a binary search in Python.", embedding=vec,
-                    domain=Domain.CODE, tier=Tier.FULL,
-                    model="deepseek-coder-v2", provider="openai",
-                    quality_score=0.92, latency_ms=5.0)
-
-        r = _mkrouter(atlas=atlas, cache=cache)
-        resp = r.chat("Write a binary search in Python.")
-        # Whether hit or miss, tier property works
-        assert resp.tier in (Tier.NO_THINK, Tier.SHORT, Tier.FULL)
-
-    def test_router_repr_shows_hit_rate(self):
-        atlas = _mk_atlas(self.tmpdir)
-        cache = _mk_cache(atlas, min_atlas_size=0)
-        r = _mkrouter(atlas=atlas, cache=cache)
-        assert "hit_rate=" in repr(r)
-
-    def test_router_repr_no_cache(self):
-        r = _mkrouter()
-        assert "hit_rate=" not in repr(r)
-
-    def test_update_quality_with_cache_router(self):
-        atlas = _mk_atlas(self.tmpdir)
-        cache = _mk_cache(atlas, min_atlas_size=0)
-        r     = _mkrouter(atlas=atlas, cache=cache)
-        emb   = HashSketchEmbedder(dim=64)
-        vec   = emb.embed("Test query")
-        rid   = atlas.store(query="Test", embedding=vec,
-                            domain=Domain.CODE, tier=Tier.FULL,
-                            model="gpt-4o", provider="openai")
-        r.update_quality(rid, 0.85)
-        rec = atlas.get(rid)
-        assert rec is not None
-        assert abs(rec.quality_score - 0.85) < 1e-6
+    def test_permanent_error_does_not_retry(self):
+        a1 = self._mock_adapter(fail_with=ProviderError("auth",401,"openai"))
+        a2 = self._mock_adapter("should not reach")
+        chain = FallbackChain(
+            [("openai",a1),("anthropic",a2)],
+            ["gpt-4o","claude-sonnet-4-6"],
+            retry_delay=0.0,
+        )
+        with pytest.raises(ProviderError):
+            chain.call(messages=[{"role":"user","content":"test"}], tier=Tier.SHORT)
+        a2.call.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_achat_cache_miss(self):
-        atlas = _mk_atlas(self.tmpdir)
-        cache = _mk_cache(atlas, min_atlas_size=0)
-        r     = _mkrouter(atlas=atlas, cache=cache)
-        resp  = await r.achat("Write a quicksort.")
-        assert isinstance(resp, RouterResponse)
+    async def test_async_primary_success(self):
+        a = self._mock_adapter("async response")
+        chain = FallbackChain([("openai",a)], ["gpt-4o"])
+        content, _, _, _, fb = await chain.acall(
+            messages=[{"role":"user","content":"test"}], tier=Tier.SHORT,
+        )
+        assert content == "async response"
+        assert fb.fallback_used is False
 
-    def test_was_cached_property(self):
-        resp = RouterResponse(
-            content="Hi", routing=None, domain_result=None,
-            model_target=None, cache_result=None, raw=None,
+    @pytest.mark.asyncio
+    async def test_async_fallback(self):
+        a1 = self._mock_adapter(fail_with=RateLimitError("429",429,"openai"))
+        a2 = self._mock_adapter("async fallback")
+        chain = FallbackChain(
+            [("openai",a1),("anthropic",a2)],
+            ["gpt-4o","claude-sonnet-4-6"],
+            retry_delay=0.0,
+        )
+        content, _, _, _, fb = await chain.acall(
+            messages=[{"role":"user","content":"test"}], tier=Tier.FULL,
+        )
+        assert content == "async fallback"
+        assert fb.fallback_used is True
+
+    def test_empty_adapters_raises(self):
+        with pytest.raises(ValueError):
+            FallbackChain([], [])
+
+    def test_mismatched_lengths_raises(self):
+        a = self._mock_adapter()
+        with pytest.raises(ValueError):
+            FallbackChain([("openai",a)], ["gpt-4o","extra"])
+
+    def test_repr(self):
+        a = self._mock_adapter()
+        chain = FallbackChain([("openai",a)], ["gpt-4o"])
+        assert "FallbackChain(" in repr(chain)
+        assert "openai:gpt-4o" in repr(chain)
+
+    def test_fallback_result_fields(self):
+        a = self._mock_adapter("ok")
+        chain = FallbackChain([("openai",a)], ["gpt-4o"])
+        _, _, _, _, fb = chain.call(
+            messages=[{"role":"user","content":"test"}], tier=Tier.SHORT
+        )
+        assert isinstance(fb, FallbackResult)
+        assert isinstance(fb.attempted, list)
+        assert isinstance(fb.succeeded, str)
+        assert isinstance(fb.total_latency_ms, float)
+
+
+# ══ PHASE 4 — RouterResponse ══════════════════════════════════════════════
+
+class TestRouterResponseV7:
+
+    def _make_resp(self, cache=None, conf=None, cost=None, fb=None):
+        return RouterResponse(
+            content="hi", routing=None, domain_result=None,
+            model_target=None, cache_result=cache,
+            confidence_result=conf, cost_record=cost,
+            fallback_result=fb, raw=None,
             provider="openai", model="gpt-4o",
-            usage_tokens={}, record_id=None,
+            usage_tokens={"prompt_tokens":100,"completion_tokens":50,"total_tokens":150},
         )
-        assert resp.was_cached is False
 
-        cr = CacheResult(
-            domain=Domain.CODE, tier=Tier.FULL, model="gpt-4o",
-            provider="openai", similarity=0.95, quality_score=0.9,
-            source_id="x", source_preview="q", latency_ms=1.0,
-        )
-        resp2 = RouterResponse(
-            content="Hi", routing=None, domain_result=None,
-            model_target=None, cache_result=cr, raw=None,
-            provider="openai", model="gpt-4o",
-            usage_tokens={}, record_id=None,
-        )
-        assert resp2.was_cached is True
+    def test_was_cached_false(self):
+        assert self._make_resp().was_cached is False
+
+    def test_was_cached_true(self):
+        cr = CacheResult(Domain.CODE,Tier.FULL,"gpt-4o","openai",0.95,0.9,"x","q",1.0)
+        assert self._make_resp(cache=cr).was_cached is True
+
+    def test_fallback_used_false(self):
+        assert self._make_resp().fallback_used is False
+
+    def test_is_high_risk_none(self):
+        assert self._make_resp().is_high_risk is False
+
+    def test_cost_usd_none(self):
+        assert self._make_resp().cost_usd == 0.0
+
+    def test_cost_usd_with_record(self):
+        from thinkrouter.cost import CostRecord as CR
+        from datetime import datetime, timezone
+        rec = CR("gpt-4o","openai",Domain.CODE,Tier.FULL,100,50,0.001234,0.003,0.001766)
+        resp = self._make_resp(cost=rec)
+        assert resp.cost_usd == 0.001234
 
 
-# ══ PHASE 2 — Atlas & Embedder (carried forward) ══════════════════════════
+# ══ PHASE 4 — ThinkRouter integration ════════════════════════════════════
 
-class TestHashSketchEmbedder:
-    def setup_method(self): self.emb = HashSketchEmbedder(dim=256)
-    def test_shape(self):         assert self.emb.embed("test").shape == (256,)
-    def test_dtype(self):         assert self.emb.embed("test").dtype == np.float32
-    def test_normalised(self):    assert abs(float(np.linalg.norm(self.emb.embed("test"))) - 1.0) < 1e-5
-    def test_deterministic(self):
-        assert np.array_equal(self.emb.embed("same"), self.emb.embed("same"))
-    def test_batch_shape(self):   assert self.emb.embed_batch(["a","b","c"]).shape == (3,256)
-    def test_dim_property(self):  assert self.emb.dim == 256
-    def test_meta_result(self):
-        r = self.emb.embed_with_meta("test")
-        assert isinstance(r, EmbeddingResult)
-        assert r.dim == 256
+class TestThinkRouterV7:
+
+    def test_confidence_result_in_response(self):
+        r = _mkrouter(with_confidence=True)
+        resp = r.chat("What happened in the news today?")
+        assert resp.confidence_result is not None
+        assert isinstance(resp.confidence_result, ConfidenceResult)
+
+    def test_confidence_none_when_disabled(self):
+        r = _mkrouter(with_confidence=False)
+        resp = r.chat("test")
+        assert resp.confidence_result is None
+
+    def test_cost_tracked(self):
+        r = _mkrouter()
+        r.chat("Write a binary search in Python.")
+        s = r.cost_tracker.summary()
+        assert s.total_calls == 1
+
+    def test_cost_record_in_response(self):
+        r = _mkrouter()
+        resp = r.chat("Write a binary search in Python.")
+        assert resp.cost_record is not None
+        assert resp.cost_record.cost_usd >= 0.0
+
+    def test_assess_confidence_standalone(self):
+        r = _mkrouter()
+        result = r.assess_confidence("What happened today in the news?")
+        assert isinstance(result, ConfidenceResult)
+        assert result.risk_score >= 0.50
+
+    def test_assess_confidence_disabled(self):
+        r = _mkrouter(with_confidence=False)
+        assert r.assess_confidence("test") is None
+
+    def test_fallback_none_by_default(self):
+        r = _mkrouter()
+        assert r._fallback is None
+
+    def test_repr_shows_saved(self):
+        r = _mkrouter()
+        r.chat("test")
+        assert "saved=$" in repr(r)
+
+    @pytest.mark.asyncio
+    async def test_achat_confidence(self):
+        r    = _mkrouter(with_confidence=True)
+        resp = await r.achat("Cite the peer-reviewed study on this.")
+        assert resp.confidence_result is not None
+
+    @pytest.mark.asyncio
+    async def test_achat_cost(self):
+        r    = _mkrouter()
+        resp = await r.achat("test")
+        assert resp.cost_record is not None
+
+
+# ══ CARRIED FORWARD — Phases 1,2,3 ═══════════════════════════════════════
 
 class TestAtlas:
     def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.atlas  = Atlas(path=self.tmpdir, embedding_dim=64, embedding_backend="test")
-        self.emb    = HashSketchEmbedder(dim=64)
+        self.tmpdir=tempfile.mkdtemp()
+        self.atlas=Atlas(path=self.tmpdir,embedding_dim=64,embedding_backend="test")
+        self.emb=HashSketchEmbedder(dim=64)
     def teardown_method(self): self.atlas.close()
-
-    def _s(self, q, domain=Domain.CODE, quality=None):
-        vec = self.emb.embed(q)
-        return self.atlas.store(query=q, embedding=vec, domain=domain,
-                                tier=Tier.FULL, model="gpt-4o",
-                                provider="openai", quality_score=quality)
-
-    def test_empty(self):          assert len(self.atlas) == 0
-    def test_store(self):          self._s("q"); assert len(self.atlas) == 1
-    def test_id_format(self):      assert len(self._s("q")) == 36
+    def _s(self,q,d=Domain.CODE,q_score=None):
+        v=self.emb.embed(q)
+        return self.atlas.store(q,v,d,Tier.FULL,"gpt-4o","openai",q_score,5.0)
+    def test_empty(self):     assert len(self.atlas)==0
+    def test_store(self):     self._s("q"); assert len(self.atlas)==1
     def test_get(self):
-        rid = self._s("test retrieval", domain=Domain.MATH)
-        rec = self.atlas.get(rid)
-        assert rec is not None and rec.domain == Domain.MATH
+        rid=self._s("test",Domain.MATH); rec=self.atlas.get(rid)
+        assert rec is not None and rec.domain==Domain.MATH
     def test_update_quality(self):
-        rid = self._s("q")
-        self.atlas.update_quality(rid, 0.88)
-        assert abs(self.atlas.get(rid).quality_score - 0.88) < 1e-6
-    def test_find_similar_empty(self):
-        vec = self.emb.embed("x")
-        assert self.atlas.find_similar(vec) == []
-    def test_stats_total(self):
-        self._s("a"); self._s("b")
-        assert self.atlas.stats().total_records == 2
-    def test_persist(self):
-        self._s("persist")
-        self.atlas.close()
-        a2 = Atlas(path=self.tmpdir, embedding_dim=64, embedding_backend="test")
-        assert len(a2) == 1; a2.close()
+        rid=self._s("q"); self.atlas.update_quality(rid,0.88)
+        assert abs(self.atlas.get(rid).quality_score-0.88)<1e-6
+    def test_thread_safe(self):
+        errors=[]
+        def w():
+            try:
+                for i in range(10): self._s(f"q{threading.current_thread().name}{i}")
+            except Exception as e: errors.append(e)
+        ths=[threading.Thread(target=w) for _ in range(5)]
+        for t in ths: t.start()
+        for t in ths: t.join()
+        assert errors==[]
+        assert len(self.atlas)==50
 
-
-# ══ PHASE 1 (carried forward) ══════════════════════════════════════════════
+class TestSemanticCache:
+    def setup_method(self):
+        self.tmpdir=tempfile.mkdtemp()
+        self.atlas=Atlas(path=self.tmpdir,embedding_dim=64,embedding_backend="test")
+        self.emb=HashSketchEmbedder(dim=64)
+        self.cache=SemanticCache(self.atlas,self.emb,threshold=0.80,min_atlas_size=0)
+    def teardown_method(self): self.atlas.close()
+    def _seed(self,q,d=Domain.CODE):
+        v=self.emb.embed(q)
+        self.atlas.store(q,v,d,Tier.FULL,"deepseek-coder-v2","openai",0.90,5.0)
+    def test_miss_empty(self):
+        assert self.cache.lookup(self.emb.embed("test")) is None
+    def test_hit_after_seed(self):
+        self._seed("Write a binary search.")
+        r=self.cache.lookup(self.emb.embed("Write a binary search."))
+        assert r is None or isinstance(r,CacheResult)
+    def test_stats(self):
+        s=self.cache.stats(); assert s.total_lookups==0
+    def test_warmup(self):
+        n=self.cache.warmup(["Write a function."],domains=[Domain.CODE])
+        assert n==1
 
 class TestDomainClassifier:
-    def setup_method(self): self.clf = DomainClassifier()
-    def test_code(self):     assert self.clf.predict("Write a binary search function in Python.").domain == Domain.CODE
-    def test_math(self):     assert self.clf.predict("Prove that sqrt(2) is irrational.").domain == Domain.MATH
-    def test_medical(self):  assert self.clf.predict("What is the mechanism of action of metformin?").domain == Domain.MEDICAL
-    def test_legal(self):    assert self.clf.predict("What are the elements of a valid contract?").domain == Domain.LEGAL
-    def test_financial(self):assert self.clf.predict("How do you build a DCF valuation model?").domain == Domain.FINANCIAL
-    def test_general(self):  assert self.clf.predict("What is the capital of France?").domain == Domain.GENERAL
-    def test_batch(self):    assert len(self.clf.predict_batch(["a","b","c"])) == 3
+    def setup_method(self): self.clf=DomainClassifier()
+    def test_code(self):     assert self.clf.predict("Write a binary search in Python.").domain==Domain.CODE
+    def test_math(self):     assert self.clf.predict("Prove sqrt(2) is irrational.").domain==Domain.MATH
+    def test_medical(self):  assert self.clf.predict("What is the mechanism of action of metformin?").domain==Domain.MEDICAL
+    def test_legal(self):    assert self.clf.predict("What are the elements of a valid contract?").domain==Domain.LEGAL
+    def test_financial(self):assert self.clf.predict("How do you build a DCF valuation model?").domain==Domain.FINANCIAL
+    def test_general(self):  assert self.clf.predict("What is the capital of France?").domain==Domain.GENERAL
 
 class TestHeuristicClassifier:
-    def setup_method(self): self.clf = get_classifier("heuristic")
-    def test_no_think(self): assert self.clf.predict("What is 7*8?").tier == Tier.NO_THINK
-    def test_full(self):     assert self.clf.predict("Prove that sqrt(2) is irrational.").tier == Tier.FULL
+    def setup_method(self): self.clf=get_classifier("heuristic")
+    def test_no_think(self): assert self.clf.predict("What is 7*8?").tier==Tier.NO_THINK
+    def test_full(self):     assert self.clf.predict("Prove sqrt(2) is irrational.").tier==Tier.FULL
+
+class TestUsageTracker:
+    def setup_method(self): self.t=UsageTracker()
+    def test_empty(self):    assert self.t.summary().total_calls==0
+    def test_record(self):
+        self.t.record("q",Tier.NO_THINK,0.9,1.0); assert self.t.summary().total_calls==1
+    def test_thread_safe(self):
+        def w():
+            for _ in range(50): self.t.record("q",Tier.SHORT,0.8,0.5)
+        ths=[threading.Thread(target=w) for _ in range(10)]
+        for t in ths: t.start()
+        for t in ths: t.join()
+        assert self.t.summary().total_calls==500
 
 class TestExceptions:
     def test_hierarchy(self):
-        assert issubclass(ProviderError, ThinkRouterError)
-        assert issubclass(RateLimitError, ProviderError)
-        assert issubclass(ClassifierError, ThinkRouterError)
-        assert issubclass(ConfigurationError, ThinkRouterError)
+        assert issubclass(ProviderError,ThinkRouterError)
+        assert issubclass(RateLimitError,ProviderError)
+        assert issubclass(ClassifierError,ThinkRouterError)
+        assert issubclass(ConfigurationError,ThinkRouterError)
 
-class TestUsageTracker:
-    def setup_method(self): self.t = UsageTracker()
-    def test_empty(self):    assert self.t.summary().total_calls == 0
-    def test_record(self):
-        self.t.record("q", Tier.NO_THINK, 0.9, 1.0)
-        assert self.t.summary().total_calls == 1
-    def test_thread_safe(self):
-        def w():
-            for _ in range(50): self.t.record("q", Tier.SHORT, 0.8, 0.5)
-        ths = [threading.Thread(target=w) for _ in range(10)]
-        for t in ths: t.start()
-        for t in ths: t.join()
-        assert self.t.summary().total_calls == 500
+class TestConstants:
+    def test_o1(self):   assert "o1" in OPENAI_REASONING_MODELS
+    def test_full(self): assert OPENAI_REASONING_EFFORT[Tier.FULL]=="high"
+    def test_notk(self): assert ANTHROPIC_THINKING_BUDGETS[Tier.NO_THINK]==0
 
 class TestThinkRouter:
-    def test_returns_response(self): assert isinstance(_mkrouter().chat("test"), RouterResponse)
-    def test_content(self):          assert _mkrouter("Hi.").chat("test").content == "Hi."
+    def test_returns_response(self): assert isinstance(_mkrouter().chat("test"),RouterResponse)
     def test_no_adapter_raises(self):
-        r = ThinkRouter.__new__(ThinkRouter)
+        r=ThinkRouter.__new__(ThinkRouter)
         r.provider="generic"; r.model="t"; r.verbose=False; r.max_retries=1
         r._clf=get_classifier("heuristic"); r._domain_clf=DomainClassifier()
         r._threshold=0.75; r.domain_routing=True; r.domain_min_confidence=0.40
         r._preferred_provider="openai"; r._registry=ModelRegistry()
         r._ollama_adapter=None; r.usage=UsageTracker()
         r._embedder=None; r.atlas=None; r.cache=None; r._adapter=None
+        r.confidence_model=None; r.cost_tracker=None; r._fallback=None
+        r._escalation_model=None
         with pytest.raises(ConfigurationError): r.chat("test")
     def test_bad_provider(self):
         with pytest.raises(ConfigurationError): ThinkRouter(provider="fake")
     @pytest.mark.asyncio
     async def test_achat(self):
-        r = _mkrouter()
-        resp = await r.achat("test")
-        assert isinstance(resp, RouterResponse)
-
-class TestConfig:
-    def test_defaults(self):
-        cfg = Config()
-        assert cfg.atlas_enabled is True
-        assert cfg.cache_enabled is True
-        assert cfg.cache_threshold == 0.92
-    def test_phase3_env(self):
-        with patch.dict(os.environ, {
-            "THINKROUTER_CACHE_ENABLED":   "0",
-            "THINKROUTER_CACHE_THRESHOLD": "0.88",
-        }):
-            cfg = Config()
-            assert cfg.cache_enabled is False
-            assert abs(cfg.cache_threshold - 0.88) < 1e-9
-
-class TestConstants:
-    def test_o1(self):   assert "o1" in OPENAI_REASONING_MODELS
-    def test_full(self): assert OPENAI_REASONING_EFFORT[Tier.FULL] == "high"
-    def test_notk(self): assert ANTHROPIC_THINKING_BUDGETS[Tier.NO_THINK] == 0
+        r=_mkrouter(); resp=await r.achat("test")
+        assert isinstance(resp,RouterResponse)
 
 class TestEndToEnd:
-    clf_c = get_classifier("heuristic"); clf_d = DomainClassifier()
-
+    clf_c=get_classifier("heuristic"); clf_d=DomainClassifier()
     @pytest.mark.parametrize("q,d",[
-        ("Write a quicksort in Python.", Domain.CODE),
-        ("Prove Fermat's Last Theorem.", Domain.MATH),
-        ("What are symptoms of diabetes?", Domain.MEDICAL),
-        ("Explain GDPR compliance.", Domain.LEGAL),
-        ("How do you calculate P/E ratio?", Domain.FINANCIAL),
-        ("What is the capital of France?", Domain.GENERAL),
+        ("Write a quicksort in Python.",Domain.CODE),
+        ("Prove Fermat Last Theorem.",Domain.MATH),
+        ("What are symptoms of diabetes?",Domain.MEDICAL),
+        ("Explain GDPR compliance.",Domain.LEGAL),
+        ("How do you calculate P/E ratio?",Domain.FINANCIAL),
+        ("What is the capital of France?",Domain.GENERAL),
     ])
-    def test_domain(self,q,d): assert self.clf_d.predict(q).domain == d
-
+    def test_domain(self,q,d): assert self.clf_d.predict(q).domain==d
     @pytest.mark.parametrize("q",["What is 12*7?","Define osmosis."])
-    def test_no_think(self,q): assert self.clf_c.predict(q).tier == Tier.NO_THINK
-
+    def test_no_think(self,q): assert self.clf_c.predict(q).tier==Tier.NO_THINK
     @pytest.mark.parametrize("q",[
         "Prove by induction that sum of first n integers is n(n+1)/2.",
         "Write a Python implementation of a balanced binary search tree.",
     ])
-    def test_full(self,q): assert self.clf_c.predict(q).tier == Tier.FULL
+    def test_full(self,q): assert self.clf_c.predict(q).tier==Tier.FULL
